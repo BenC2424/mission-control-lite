@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "id": "ultron",
+      "sessionKey": "agent:main:telegram:direct:8052126252",
+      "role": "coordinator",
+      "capabilities": ["orchestration", "approval", "messaging", "repo-admin"],
+      "canExternalMessage": true,
+      "canDestructive": false
+    },
+    {
+      "id": "codi",
+      "sessionKey": "agent:main:subagent:codi",
+      "role": "coder",
+      "capabilities": ["code", "test", "refactor", "ci"],
+      "canExternalMessage": false,
+      "canDestructive": false
+    },
+    {
+      "id": "scout",
+      "sessionKey": "agent:main:subagent:scout",
+      "role": "researcher",
+      "capabilities": ["web-research", "synthesis", "source-validation"],
+      "canExternalMessage": false,
+      "canDestructive": false
+    }
+  ]
+}

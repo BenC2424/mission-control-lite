@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mission Control Lite v0.2</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Mission Control Lite</h1>
+        <p class="muted">Ultron • Codi • Scout</p>
+      </div>
+      <div class="metrics">
+        <div class="metric"><span id="metric-agents">3</span><label>Agents</label></div>
+        <div class="metric"><span id="metric-tasks">0</span><label>Tasks</label></div>
+        <div class="metric"><span id="metric-inprogress">0</span><label>In Progress</label></div>
+      </div>
+      <div class="actions">
+        <button id="newTaskBtn">+ New Task</button>
+        <button id="refreshBtn">Refresh</button>
+        <button id="standupBtn">Generate Standup</button>
+      </div>
+    </header>
+
+    <div class="filters panel">
+      <label>Owner
+        <select id="filterOwner">
+          <option value="all">all</option><option value="ultron">ultron</option><option value="codi">codi</option><option value="scout">scout</option>
+        </select>
+      </label>
+      <label>Status
+        <select id="filterStatus">
+          <option value="all">all</option><option>inbox</option><option>assigned</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option>
+        </select>
+      </label>
+      <label>Priority
+        <select id="filterPriority">
+          <option value="all">all</option><option>p0</option><option>p1</option><option>p2</option><option>p3</option>
+        </select>
+      </label>
+    </div>
+
+    <main class="layout">
+      <aside class="panel agents"><h2>Agents</h2><div id="agentList"></div></aside>
+      <section class="panel board"><h2>Mission Queue</h2><div class="kanban" id="kanban"></div></section>
+      <aside class="panel feed"><h2>Live Feed</h2><div id="feed"></div></aside>
+    </main>
+
+    <section class="panel standup">
+      <h2>Standup Preview</h2>
+      <pre id="standupOut">Click “Generate Standup”</pre>
+    </section>
+
+    <aside id="drawer" class="drawer hidden">
+      <div class="drawer-head"><strong id="d-title">Task</strong><button id="closeDrawer">Close</button></div>
+      <div class="drawer-body">
+        <div class="muted" id="d-id"></div>
+        <label>Status<select id="d-status"><option>inbox</option><option>assigned</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option></select></label>
+        <label>Owner<select id="d-owner"><option>ultron</option><option>codi</option><option>scout</option></select></label>
+        <button id="saveTask">Save Task</button>
+        <label>Add Note<textarea id="d-note" rows="4" placeholder="Enter note..."></textarea></label>
+        <button id="saveNote">Add Note</button>
+        <h4>Notes</h4><div id="d-notes"></div>
+      </div>
+    </aside>
+
+    <aside id="createModal" class="drawer hidden">
+      <div class="drawer-head"><strong>Create Task</strong><button id="closeCreate">Close</button></div>
+      <div class="drawer-body">
+        <label>Title<input id="c-title" type="text" placeholder="Task title" /></label>
+        <label>Owner<select id="c-owner"><option>ultron</option><option>codi</option><option>scout</option></select></label>
+        <label>Status<select id="c-status"><option>inbox</option><option>assigned</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option></select></label>
+        <label>Priority<select id="c-priority"><option>p0</option><option>p1</option><option selected>p2</option><option>p3</option></select></label>
+        <button id="createTask">Create</button>
+      </div>
+    </aside>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

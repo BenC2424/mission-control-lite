@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "mcl-a70d2a0f",
+      "title": "Bootstrap Mission Control Lite",
+      "status": "assigned",
+      "priority": "p1",
+      "owner": "ultron",
+      "notes": [
+        {
+          "at": "2026-02-24T06:47:45.277Z",
+          "note": "Good Progress"
+        }
+      ],
+      "evidence": {
+        "tests": [],
+        "artifacts": [],
+        "sources": []
+      },
+      "createdAt": "2026-02-24T06:16:27.768Z",
+      "updatedAt": "2026-02-24T06:47:45.277Z"
+    },
+    {
+      "id": "mcl-9201c20a",
+      "title": "Color Code Agents",
+      "status": "inbox",
+      "priority": "p2",
+      "owner": "codi",
+      "notes": [],
+      "evidence": {
+        "tests": [],
+        "artifacts": [],
+        "sources": []
+      },
+      "createdAt": "2026-02-24T06:53:09.467Z",
+      "updatedAt": "2026-02-24T06:53:09.467Z"
+    }
+  ]
+}
