@@ -1,4 +1,4 @@
-# Mission Control Lite v0.5
+# Mission Control Lite v0.6
 
 Lean local-first multi-agent operating system for Ultron + Codi + Scout.
 
@@ -24,7 +24,7 @@ npm run start
 
 Open: `http://localhost:8787/ui/index.html`
 
-## v0.5 highlights
+## v0.6 highlights
 - Health endpoint: `GET /api/health`
 - Stronger API validation for task create/update
 - Activity persistence: `runtime/activity.json`
@@ -34,7 +34,8 @@ Open: `http://localhost:8787/ui/index.html`
 - Keyboard shortcuts: `n` new task, `r` refresh, `g` standup, `Esc` close drawers
 - Search filter (task title/id) for faster triage
 - Delete task action with confirmation prompt
-- API integration tests for health + invalid create + delete flow (`npm test`)
+- Snapshot export/import (local JSON backup/restore)
+- API integration tests for health + invalid create + delete + export flow (`npm test`)
 
 ## Two-week rollout
 - Week 1: run with 3 agents, no autonomous deploys.

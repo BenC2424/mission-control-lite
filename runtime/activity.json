@@ -2,6 +2,20 @@
   "version": 1,
   "events": [
     {
+      "at": "2026-02-24T22:05:15.533Z",
+      "type": "task_deleted",
+      "message": "mcl-b1fda5fb: Delete me",
+      "taskId": "mcl-b1fda5fb",
+      "actor": "ui"
+    },
+    {
+      "at": "2026-02-24T22:05:15.531Z",
+      "type": "task_created",
+      "message": "ultron created mcl-b1fda5fb: Delete me",
+      "taskId": "mcl-b1fda5fb",
+      "actor": "ultron"
+    },
+    {
       "at": "2026-02-24T21:48:10.260Z",
       "type": "task_deleted",
       "message": "mcl-c6f101cd: Delete me",

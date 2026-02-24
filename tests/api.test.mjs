@@ -54,3 +54,12 @@ test('POST /api/task/delete deletes created task', async () => {
   const out = await del.json();
   assert.equal(out.deletedId, id);
 });
+
+test('GET /api/export returns snapshot payload', async () => {
+  const res = await fetch(`${base}/api/export`);
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(Array.isArray(json.tasks), true);
+  assert.equal(Array.isArray(json.activity), true);
+  assert.equal(Array.isArray(json.agents), true);
+});

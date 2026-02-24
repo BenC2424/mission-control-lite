@@ -89,6 +89,16 @@ export const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/agents' && req.method === 'GET') return send(res, 200, readJson(paths.agents));
     if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, readJson(paths.activity));
 
+    if (url.pathname === '/api/export' && req.method === 'GET') {
+      return send(res, 200, {
+        version: 1,
+        exportedAt: now(),
+        tasks: readJson(paths.tasks).tasks || [],
+        activity: readJson(paths.activity).events || [],
+        agents: readJson(paths.agents).agents || []
+      });
+    }
+
     if (url.pathname === '/api/task/create' && req.method === 'POST') {
       const body = await parseBody(req);
       const validation = validateTaskCreate(body);
@@ -153,6 +163,21 @@ export const server = http.createServer(async (req, res) => {
       writeJson(paths.tasks, db);
       logEvent('task_deleted', `${removed.id}: ${removed.title}`, removed.id, body.actor || 'ui');
       return send(res, 200, { ok: true, deletedId: removed.id });
+    }
+
+    if (url.pathname === '/api/import' && req.method === 'POST') {
+      const body = await parseBody(req);
+      if (!body || body.overwrite !== true) {
+        return send(res, 400, { error: 'validation_failed', details: ['overwrite=true is required'] });
+      }
+      if (!Array.isArray(body.tasks) || !Array.isArray(body.activity)) {
+        return send(res, 400, { error: 'validation_failed', details: ['tasks and activity arrays are required'] });
+      }
+
+      writeJson(paths.tasks, { version: 1, tasks: body.tasks });
+      writeJson(paths.activity, { version: 1, events: body.activity });
+      logEvent('import', `Imported snapshot with ${body.tasks.length} tasks and ${body.activity.length} events`, null, body.actor || 'ui');
+      return send(res, 200, { ok: true, tasks: body.tasks.length, activity: body.activity.length });
     }
 
     if (url.pathname === '/api/standup' && req.method === 'POST') {

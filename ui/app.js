@@ -217,6 +217,47 @@ $('standupBtn').onclick = async () => {
   }
 };
 
+$('exportBtn').onclick = async () => {
+  try {
+    const snapshot = await api('/api/export');
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `mission-control-snapshot-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showError(`Export failed: ${e.message}`);
+  }
+};
+
+$('importBtn').onclick = () => $('importFile').click();
+$('importFile').onchange = async (e) => {
+  try {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    const json = JSON.parse(text);
+    const ok = confirm('Import snapshot and overwrite current local tasks/activity?');
+    if (!ok) return;
+    await api('/api/import', {
+      method: 'POST',
+      body: JSON.stringify({
+        overwrite: true,
+        tasks: json.tasks || [],
+        activity: json.activity || [],
+        actor: 'ui.import'
+      })
+    });
+    await refresh();
+  } catch (err) {
+    showError(`Import failed: ${err.message}`);
+  } finally {
+    $('importFile').value = '';
+  }
+};
+
 document.addEventListener('keydown', async (e) => {
   if (e.key === 'Escape') {
     $('drawer').classList.add('hidden');
