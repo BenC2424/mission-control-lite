@@ -2,6 +2,34 @@
   "version": 1,
   "events": [
     {
+      "at": "2026-02-24T22:15:16.490Z",
+      "type": "task_deleted",
+      "message": "mcl-2cbcdb13: Delete me",
+      "taskId": "mcl-2cbcdb13",
+      "actor": "ui"
+    },
+    {
+      "at": "2026-02-24T22:15:16.485Z",
+      "type": "task_created",
+      "message": "ultron created mcl-2cbcdb13: Delete me",
+      "taskId": "mcl-2cbcdb13",
+      "actor": "ultron"
+    },
+    {
+      "at": "2026-02-24T22:14:47.121Z",
+      "type": "task_deleted",
+      "message": "mcl-d258497c: Delete me",
+      "taskId": "mcl-d258497c",
+      "actor": "ui"
+    },
+    {
+      "at": "2026-02-24T22:14:47.117Z",
+      "type": "task_created",
+      "message": "ultron created mcl-d258497c: Delete me",
+      "taskId": "mcl-d258497c",
+      "actor": "ultron"
+    },
+    {
       "at": "2026-02-24T22:05:15.533Z",
       "type": "task_deleted",
       "message": "mcl-b1fda5fb: Delete me",

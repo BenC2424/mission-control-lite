@@ -6,6 +6,7 @@ h1{margin:0;font-size:1.15rem}.muted{margin:2px 0 0;color:var(--muted);font-size
 .metric span{display:block;font-weight:700}.metric label{color:var(--muted);font-size:.75rem}
 .actions{display:flex;gap:8px}button{border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 11px;cursor:pointer}
 button.danger{border-color:#e5a3a3;background:#fff3f3;color:#8b1f1f}
+.hidden{display:none}
 .flash{margin:10px 12px 0;padding:8px 10px;border-radius:10px;border:1px solid #f0c5c5;background:#fff2f2;color:#7a2020;font-size:.85rem}
 .flash.hidden{display:none}
 .filters{margin:10px 12px 0;display:flex;gap:12px;align-items:end}

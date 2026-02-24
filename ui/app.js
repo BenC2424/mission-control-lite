@@ -5,10 +5,12 @@ const $ = (id) => document.getElementById(id);
 let cachedTasks = [];
 let cachedAgents = [];
 let cachedEvents = [];
+let readOnly = false;
 let selectedId = null;
 let draggedTaskId = null;
 
 const filters = { owner: 'all', status: 'all', priority: 'all', search: '' };
+let feedType = 'all';
 
 function showError(message) {
   const el = $('flash');
@@ -27,10 +29,11 @@ async function api(path, opts = {}) {
 }
 
 async function loadData() {
-  const [t, a, ev] = await Promise.all([api('/api/tasks'), api('/api/agents'), api('/api/activity')]);
+  const [t, a, ev, cfg] = await Promise.all([api('/api/tasks'), api('/api/agents'), api('/api/activity'), api('/api/config')]);
   cachedTasks = t.tasks ?? [];
   cachedAgents = a.agents ?? [];
   cachedEvents = ev.events ?? [];
+  readOnly = Boolean(cfg.readOnly);
 }
 
 function filteredTasks() {
@@ -65,6 +68,7 @@ function renderBoard() {
     col.addEventListener('dragover', (e) => e.preventDefault());
     col.addEventListener('drop', async (e) => {
       e.preventDefault();
+      if (readOnly) return;
       if (!draggedTaskId) return;
       await api('/api/task/update', { method: 'POST', body: JSON.stringify({ id: draggedTaskId, status, actor: 'ui.dragdrop' }) });
       draggedTaskId = null;
@@ -87,10 +91,24 @@ function renderBoard() {
 
 function renderFeed() {
   const feed = $('feed'); feed.innerHTML = '';
-  cachedEvents.slice(0, 30).forEach((e) => {
-    const div = document.createElement('div'); div.className = 'feed-item';
-    div.innerHTML = `<strong>${e.type}</strong><br/><span class="muted">${e.message}</span><br/><span class="muted">${e.at}</span>`;
-    feed.appendChild(div);
+  cachedEvents
+    .filter((e) => feedType === 'all' || e.type === feedType)
+    .slice(0, 30)
+    .forEach((e) => {
+      const div = document.createElement('div'); div.className = 'feed-item';
+      div.innerHTML = `<strong>${e.type}</strong><br/><span class="muted">${e.message}</span><br/><span class="muted">${e.at}</span>`;
+      feed.appendChild(div);
+    });
+}
+
+function renderMode() {
+  const badge = $('readonlyBadge');
+  if (readOnly) badge.classList.remove('hidden');
+  else badge.classList.add('hidden');
+
+  ['newTaskBtn','saveTask','deleteTask','saveNote','createTask','standupBtn','importBtn'].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = readOnly;
   });
 }
 
@@ -123,7 +141,7 @@ async function refresh() {
   try {
     await loadData();
     clearError();
-    renderAgents(); renderBoard(); renderFeed(); renderMetrics();
+    renderAgents(); renderBoard(); renderFeed(); renderMetrics(); renderMode();
     if (selectedId) openDrawer(selectedId);
   } catch (e) {
     showError(`Refresh failed: ${e.message}`);
@@ -134,8 +152,9 @@ $('filterOwner').onchange = (e) => { filters.owner = e.target.value; renderBoard
 $('filterStatus').onchange = (e) => { filters.status = e.target.value; renderBoard(); renderMetrics(); };
 $('filterPriority').onchange = (e) => { filters.priority = e.target.value; renderBoard(); renderMetrics(); };
 $('filterSearch').oninput = (e) => { filters.search = e.target.value; renderBoard(); renderMetrics(); };
+$('feedType').onchange = (e) => { feedType = e.target.value; renderFeed(); };
 
-$('newTaskBtn').onclick = () => $('createModal').classList.remove('hidden');
+$('newTaskBtn').onclick = () => { if (!readOnly) $('createModal').classList.remove('hidden'); };
 $('closeCreate').onclick = () => $('createModal').classList.add('hidden');
 $('createTask').onclick = async () => {
   try {

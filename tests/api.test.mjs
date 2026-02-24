@@ -25,6 +25,13 @@ test('GET /api/health responds ok', async () => {
   assert.equal(json.ok, true);
 });
 
+test('GET /api/config returns readOnly flag', async () => {
+  const res = await fetch(`${base}/api/config`);
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(typeof json.readOnly, 'boolean');
+});
+
 test('POST /api/task/create rejects invalid payload', async () => {
   const res = await fetch(`${base}/api/task/create`, {
     method: 'POST',

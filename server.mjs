@@ -9,6 +9,7 @@ import { validateTaskCreate, validateTaskUpdate, VALID_PRIORITY } from './lib/va
 const __dirname = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const HOST = '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
+const READ_ONLY = process.env.READ_ONLY === '1';
 
 const paths = {
   tasks: join(__dirname, 'runtime', 'tasks.json'),
@@ -85,6 +86,7 @@ export const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/health' && req.method === 'GET') {
       return send(res, 200, { ok: true, service: 'mission-control-lite', time: now() });
     }
+    if (url.pathname === '/api/config' && req.method === 'GET') return send(res, 200, { readOnly: READ_ONLY });
     if (url.pathname === '/api/tasks' && req.method === 'GET') return send(res, 200, readJson(paths.tasks));
     if (url.pathname === '/api/agents' && req.method === 'GET') return send(res, 200, readJson(paths.agents));
     if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, readJson(paths.activity));
@@ -100,6 +102,7 @@ export const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/task/create' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
       const validation = validateTaskCreate(body);
       if (!validation.ok) return send(res, 400, { error: 'validation_failed', details: validation.errors });
@@ -123,6 +126,7 @@ export const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/task/update' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const patch = await parseBody(req);
       const validation = validateTaskUpdate(patch);
       if (!validation.ok) return send(res, 400, { error: 'validation_failed', details: validation.errors });
@@ -141,6 +145,7 @@ export const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/task/note' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
       const db = readJson(paths.tasks);
       const t = db.tasks.find((x) => x.id === body.id);
@@ -154,6 +159,7 @@ export const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/task/delete' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
       if (!body.id) return send(res, 400, { error: 'validation_failed', details: ['id is required'] });
       const db = readJson(paths.tasks);
@@ -166,6 +172,7 @@ export const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/import' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
       if (!body || body.overwrite !== true) {
         return send(res, 400, { error: 'validation_failed', details: ['overwrite=true is required'] });
@@ -181,6 +188,7 @@ export const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/standup' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const db = readJson(paths.tasks);
       const text = getStandup(db.tasks || []);
       writeFileSync(paths.standup, text + '\n');
