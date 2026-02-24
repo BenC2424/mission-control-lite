@@ -64,7 +64,7 @@ function renderBoard() {
     col.addEventListener('drop', async (e) => {
       e.preventDefault();
       if (!draggedTaskId) return;
-      await api('/api/task/update', { method: 'POST', body: JSON.stringify({ id: draggedTaskId, status }) });
+      await api('/api/task/update', { method: 'POST', body: JSON.stringify({ id: draggedTaskId, status, actor: 'ui.dragdrop' }) });
       draggedTaskId = null;
       await refresh();
     });
@@ -110,6 +110,11 @@ function openDrawer(id) {
   $('d-priority').value = t.priority || 'p2';
   const notes = t.notes || [];
   $('d-notes').innerHTML = notes.length ? notes.map((n) => `<div class="note"><div class="muted">${n.at}</div>${n.note}</div>`).join('') : '<div class="muted">No notes yet.</div>';
+
+  const events = cachedEvents.filter((e) => e.taskId === t.id).slice(0, 15);
+  $('d-activity').innerHTML = events.length
+    ? events.map((e) => `<div class="note"><div class="muted">${e.at} • ${e.type}</div>${e.message}</div>`).join('')
+    : '<div class="muted">No activity yet.</div>';
 }
 
 async function refresh() {
@@ -137,7 +142,8 @@ $('createTask').onclick = async () => {
       title,
       owner: $('c-owner').value,
       status: $('c-status').value,
-      priority: $('c-priority').value
+      priority: $('c-priority').value,
+      actor: 'ui.create'
     })});
     $('c-title').value = '';
     $('createModal').classList.add('hidden');
@@ -159,7 +165,8 @@ $('saveTask').onclick = async () => {
         id: selectedId,
         status: $('d-status').value,
         owner: $('d-owner').value,
-        priority: $('d-priority').value
+        priority: $('d-priority').value,
+        actor: 'ui.drawer'
       })
     });
     await refresh();
@@ -173,7 +180,7 @@ $('saveNote').onclick = async () => {
     if (!selectedId) return;
     const note = $('d-note').value.trim();
     if (!note) return;
-    await api('/api/task/note', { method: 'POST', body: JSON.stringify({ id: selectedId, note }) });
+    await api('/api/task/note', { method: 'POST', body: JSON.stringify({ id: selectedId, note, actor: 'ui.note' }) });
     $('d-note').value = '';
     await refresh();
   } catch (e) {
@@ -189,6 +196,19 @@ $('standupBtn').onclick = async () => {
     showError(`Standup failed: ${e.message}`);
   }
 };
+
+document.addEventListener('keydown', async (e) => {
+  if (e.key === 'Escape') {
+    $('drawer').classList.add('hidden');
+    $('createModal').classList.add('hidden');
+    return;
+  }
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+
+  if (e.key.toLowerCase() === 'n') $('createModal').classList.remove('hidden');
+  if (e.key.toLowerCase() === 'r') await refresh();
+  if (e.key.toLowerCase() === 'g') $('standupBtn').click();
+});
 
 refresh();
 setInterval(refresh, 15000);

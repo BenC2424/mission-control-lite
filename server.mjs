@@ -50,10 +50,10 @@ function parseBody(req) {
   });
 }
 
-function logEvent(type, message) {
+function logEvent(type, message, taskId = null, actor = 'system') {
   const db = readJson(paths.activity);
-  db.events.unshift({ at: now(), type, message });
-  db.events = db.events.slice(0, 200);
+  db.events.unshift({ at: now(), type, message, taskId, actor });
+  db.events = db.events.slice(0, 300);
   writeJson(paths.activity, db);
 }
 
@@ -108,7 +108,7 @@ const server = http.createServer(async (req, res) => {
       };
       db.tasks.push(task);
       writeJson(paths.tasks, db);
-      logEvent('task_created', `${task.owner} created ${task.id}: ${task.title}`);
+      logEvent('task_created', `${task.owner} created ${task.id}: ${task.title}`, task.id, task.owner);
       return send(res, 200, { ok: true, task });
     }
 
@@ -126,7 +126,7 @@ const server = http.createServer(async (req, res) => {
       if (patch.priority && VALID_PRIORITY.includes(patch.priority)) t.priority = patch.priority;
       t.updatedAt = now();
       writeJson(paths.tasks, db);
-      logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`);
+      logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`, t.id, patch.actor || 'ui');
       return send(res, 200, { ok: true, task: t });
     }
 
@@ -139,7 +139,7 @@ const server = http.createServer(async (req, res) => {
       t.notes.push({ at: now(), note: body.note || '' });
       t.updatedAt = now();
       writeJson(paths.tasks, db);
-      logEvent('task_note', `${t.id}: ${body.note || ''}`);
+      logEvent('task_note', `${t.id}: ${body.note || ''}`, t.id, body.actor || 'ui');
       return send(res, 200, { ok: true, task: t });
     }
 
