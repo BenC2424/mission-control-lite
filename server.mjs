@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { validateTaskCreate, validateTaskUpdate, VALID_PRIORITY } from './lib/validation.mjs';
 
 const __dirname = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const HOST = '0.0.0.0';
@@ -81,16 +82,22 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 200, '');
 
   try {
+    if (url.pathname === '/api/health' && req.method === 'GET') {
+      return send(res, 200, { ok: true, service: 'mission-control-lite', time: now() });
+    }
     if (url.pathname === '/api/tasks' && req.method === 'GET') return send(res, 200, readJson(paths.tasks));
     if (url.pathname === '/api/agents' && req.method === 'GET') return send(res, 200, readJson(paths.agents));
     if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, readJson(paths.activity));
 
     if (url.pathname === '/api/task/create' && req.method === 'POST') {
       const body = await parseBody(req);
+      const validation = validateTaskCreate(body);
+      if (!validation.ok) return send(res, 400, { error: 'validation_failed', details: validation.errors });
+
       const db = readJson(paths.tasks);
       const task = {
         id: `mcl-${randomUUID().slice(0, 8)}`,
-        title: body.title || 'Untitled Task',
+        title: body.title.trim(),
         status: body.status || 'inbox',
         priority: body.priority || 'p2',
         owner: body.owner || 'ultron',
@@ -107,12 +114,16 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/task/update' && req.method === 'POST') {
       const patch = await parseBody(req);
+      const validation = validateTaskUpdate(patch);
+      if (!validation.ok) return send(res, 400, { error: 'validation_failed', details: validation.errors });
+
       const db = readJson(paths.tasks);
       const t = db.tasks.find((x) => x.id === patch.id);
       if (!t) return send(res, 404, { error: 'task not found' });
 
       if (patch.status) t.status = patch.status;
       if (patch.owner) t.owner = patch.owner;
+      if (patch.priority && VALID_PRIORITY.includes(patch.priority)) t.priority = patch.priority;
       t.updatedAt = now();
       writeJson(paths.tasks, db);
       logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`);

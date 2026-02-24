@@ -1,6 +1,6 @@
-# Mission Control Lite v1
+# Mission Control Lite v0.3
 
-Lean multi-agent operating system for Ultron + Codi + Scout.
+Lean local-first multi-agent operating system for Ultron + Codi + Scout.
 
 ## Components
 - `config/agents.json` — registry, roles, capability boundaries
@@ -15,6 +15,22 @@ Lean multi-agent operating system for Ultron + Codi + Scout.
 3. Codi/Scout execute deterministic steps, attach evidence.
 4. Approval gates block risky actions.
 5. Standup summarizes outcomes + blockers daily.
+
+## Run
+```bash
+npm install
+npm run start
+```
+
+Open: `http://localhost:8787/ui/index.html`
+
+## v0.3 highlights
+- Health endpoint: `GET /api/health`
+- Stronger API validation for task create/update
+- Activity persistence: `runtime/activity.json`
+- UI task create modal + filters + detail drawer edits
+- Drag-and-drop task status updates across kanban columns
+- Node tests for validation logic (`npm test`)
 
 ## Two-week rollout
 - Week 1: run with 3 agents, no autonomous deploys.
