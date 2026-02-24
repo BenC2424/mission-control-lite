@@ -2,7 +2,7 @@
 import http from 'node:http';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { validateTaskCreate, validateTaskUpdate, VALID_PRIORITY } from './lib/validation.mjs';
 
@@ -77,7 +77,7 @@ function getStandup(tasks) {
   ].join('\n');
 }
 
-const server = http.createServer(async (req, res) => {
+export const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (req.method === 'OPTIONS') return send(res, 200, '');
 
@@ -161,6 +161,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`Mission Control server running on http://${HOST}:${PORT}`);
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  server.listen(PORT, HOST, () => {
+    console.log(`Mission Control server running on http://${HOST}:${PORT}`);
+  });
+}
