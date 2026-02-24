@@ -35,3 +35,22 @@ test('POST /api/task/create rejects invalid payload', async () => {
   const json = await res.json();
   assert.equal(json.error, 'validation_failed');
 });
+
+test('POST /api/task/delete deletes created task', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Delete me', status: 'inbox', owner: 'ultron', priority: 'p2' })
+  });
+  const created = await create.json();
+  const id = created.task.id;
+
+  const del = await fetch(`${base}/api/task/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id })
+  });
+  assert.equal(del.status, 200);
+  const out = await del.json();
+  assert.equal(out.deletedId, id);
+});

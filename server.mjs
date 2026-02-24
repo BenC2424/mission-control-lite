@@ -143,6 +143,18 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, task: t });
     }
 
+    if (url.pathname === '/api/task/delete' && req.method === 'POST') {
+      const body = await parseBody(req);
+      if (!body.id) return send(res, 400, { error: 'validation_failed', details: ['id is required'] });
+      const db = readJson(paths.tasks);
+      const index = db.tasks.findIndex((x) => x.id === body.id);
+      if (index === -1) return send(res, 404, { error: 'task not found' });
+      const [removed] = db.tasks.splice(index, 1);
+      writeJson(paths.tasks, db);
+      logEvent('task_deleted', `${removed.id}: ${removed.title}`, removed.id, body.actor || 'ui');
+      return send(res, 200, { ok: true, deletedId: removed.id });
+    }
+
     if (url.pathname === '/api/standup' && req.method === 'POST') {
       const db = readJson(paths.tasks);
       const text = getStandup(db.tasks || []);

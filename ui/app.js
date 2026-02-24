@@ -8,7 +8,7 @@ let cachedEvents = [];
 let selectedId = null;
 let draggedTaskId = null;
 
-const filters = { owner: 'all', status: 'all', priority: 'all' };
+const filters = { owner: 'all', status: 'all', priority: 'all', search: '' };
 
 function showError(message) {
   const el = $('flash');
@@ -34,10 +34,12 @@ async function loadData() {
 }
 
 function filteredTasks() {
+  const query = filters.search.trim().toLowerCase();
   return cachedTasks.filter((t) =>
     (filters.owner === 'all' || t.owner === filters.owner) &&
     (filters.status === 'all' || t.status === filters.status) &&
-    (filters.priority === 'all' || t.priority === filters.priority)
+    (filters.priority === 'all' || t.priority === filters.priority) &&
+    (!query || t.title.toLowerCase().includes(query) || t.id.toLowerCase().includes(query))
   );
 }
 
@@ -131,6 +133,7 @@ async function refresh() {
 $('filterOwner').onchange = (e) => { filters.owner = e.target.value; renderBoard(); renderMetrics(); };
 $('filterStatus').onchange = (e) => { filters.status = e.target.value; renderBoard(); renderMetrics(); };
 $('filterPriority').onchange = (e) => { filters.priority = e.target.value; renderBoard(); renderMetrics(); };
+$('filterSearch').oninput = (e) => { filters.search = e.target.value; renderBoard(); renderMetrics(); };
 
 $('newTaskBtn').onclick = () => $('createModal').classList.remove('hidden');
 $('closeCreate').onclick = () => $('createModal').classList.add('hidden');
@@ -172,6 +175,23 @@ $('saveTask').onclick = async () => {
     await refresh();
   } catch (e) {
     showError(`Save failed: ${e.message}`);
+  }
+};
+
+$('deleteTask').onclick = async () => {
+  try {
+    if (!selectedId) return;
+    const ok = confirm(`Delete task ${selectedId}? This cannot be undone.`);
+    if (!ok) return;
+    await api('/api/task/delete', {
+      method: 'POST',
+      body: JSON.stringify({ id: selectedId, actor: 'ui.delete' })
+    });
+    $('drawer').classList.add('hidden');
+    selectedId = null;
+    await refresh();
+  } catch (e) {
+    showError(`Delete failed: ${e.message}`);
   }
 };
 

@@ -41,6 +41,9 @@
           <option value="all">all</option><option>p0</option><option>p1</option><option>p2</option><option>p3</option>
         </select>
       </label>
+      <label>Search
+        <input id="filterSearch" type="text" placeholder="title or id" />
+      </label>
     </div>
 
     <main class="layout">
@@ -62,6 +65,7 @@
         <label>Owner<select id="d-owner"><option>ultron</option><option>codi</option><option>scout</option></select></label>
         <label>Priority<select id="d-priority"><option>p0</option><option>p1</option><option>p2</option><option>p3</option></select></label>
         <button id="saveTask">Save Task</button>
+        <button id="deleteTask" class="danger">Delete Task</button>
         <label>Add Note<textarea id="d-note" rows="4" placeholder="Enter note..."></textarea></label>
         <button id="saveNote">Add Note</button>
         <h4>Notes</h4><div id="d-notes"></div>

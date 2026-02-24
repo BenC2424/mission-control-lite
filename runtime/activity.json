@@ -2,6 +2,20 @@
   "version": 1,
   "events": [
     {
+      "at": "2026-02-24T21:48:10.260Z",
+      "type": "task_deleted",
+      "message": "mcl-c6f101cd: Delete me",
+      "taskId": "mcl-c6f101cd",
+      "actor": "ui"
+    },
+    {
+      "at": "2026-02-24T21:48:10.257Z",
+      "type": "task_created",
+      "message": "ultron created mcl-c6f101cd: Delete me",
+      "taskId": "mcl-c6f101cd",
+      "actor": "ultron"
+    },
+    {
       "at": "2026-02-24T06:53:09.467Z",
       "type": "task_created",
       "message": "codi created mcl-9201c20a: Color Code Agents"
