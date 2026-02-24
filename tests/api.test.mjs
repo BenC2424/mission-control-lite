@@ -70,3 +70,28 @@ test('GET /api/export returns snapshot payload', async () => {
   assert.equal(Array.isArray(json.activity), true);
   assert.equal(Array.isArray(json.agents), true);
 });
+
+test('assign -> inbox -> claim-next flow works', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Heartbeat task', status: 'assigned', owner: 'ultron', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const assign = await fetch(`${base}/api/task/assign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskId: c.task.id, agentIds: ['codi'] })
+  });
+  assert.equal(assign.status, 200);
+
+  const inbox = await fetch(`${base}/api/agent/codi/inbox`);
+  const i = await inbox.json();
+  assert.equal(i.tasks.some((t) => t.id === c.task.id), true);
+
+  const claim = await fetch(`${base}/api/agent/codi/claim-next`, { method: 'POST' });
+  const cl = await claim.json();
+  assert.equal(cl.ok, true);
+  assert.equal(cl.task.id, c.task.id);
+});

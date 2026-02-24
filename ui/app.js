@@ -106,7 +106,7 @@ function renderMode() {
   if (readOnly) badge.classList.remove('hidden');
   else badge.classList.add('hidden');
 
-  ['newTaskBtn','saveTask','deleteTask','saveNote','createTask','standupBtn','importBtn'].forEach((id) => {
+  ['newTaskBtn','saveTask','assignTask','deleteTask','saveNote','createTask','standupBtn','importBtn'].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = readOnly;
   });
@@ -194,6 +194,20 @@ $('saveTask').onclick = async () => {
     await refresh();
   } catch (e) {
     showError(`Save failed: ${e.message}`);
+  }
+};
+
+$('assignTask').onclick = async () => {
+  try {
+    if (!selectedId) return;
+    const agentId = $('assignAgent').value;
+    await api('/api/task/assign', {
+      method: 'POST',
+      body: JSON.stringify({ taskId: selectedId, agentIds: [agentId], actor: 'ui.assign' })
+    });
+    await refresh();
+  } catch (e) {
+    showError(`Assign failed: ${e.message}`);
   }
 };
 
