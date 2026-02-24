@@ -19,7 +19,7 @@ async function waitForHealth(timeoutMs = 5000) {
 }
 
 test.before(async () => {
-  proc = spawn('node', ['server.mjs'], {
+  proc = spawn(process.execPath, ['server.mjs'], {
     cwd: '/home/ubuntu/.openclaw/workspace/mission-control-lite',
     env: { ...process.env, PORT: String(PORT) },
     stdio: 'ignore'
