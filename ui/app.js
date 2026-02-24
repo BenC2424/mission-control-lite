@@ -6,6 +6,7 @@ let cachedTasks = [];
 let cachedAgents = [];
 let cachedEvents = [];
 let readOnly = false;
+let metrics = null;
 let selectedId = null;
 let draggedTaskId = null;
 
@@ -29,11 +30,18 @@ async function api(path, opts = {}) {
 }
 
 async function loadData() {
-  const [t, a, ev, cfg] = await Promise.all([api('/api/tasks'), api('/api/agents'), api('/api/activity'), api('/api/config')]);
+  const [t, a, ev, cfg, m] = await Promise.all([
+    api('/api/tasks'),
+    api('/api/agents'),
+    api('/api/activity'),
+    api('/api/config'),
+    api('/api/metrics')
+  ]);
   cachedTasks = t.tasks ?? [];
   cachedAgents = a.agents ?? [];
   cachedEvents = ev.events ?? [];
   readOnly = Boolean(cfg.readOnly);
+  metrics = m;
 }
 
 function filteredTasks() {
@@ -116,6 +124,13 @@ function renderMetrics() {
   const tasks = filteredTasks();
   $('metric-tasks').textContent = String(tasks.length);
   $('metric-inprogress').textContent = String(tasks.filter((t) => t.status === 'in_progress').length);
+  $('metric-done').textContent = String(metrics?.tasks?.done ?? 0);
+  $('metric-stale').textContent = String(metrics?.staleOpen ?? 0);
+
+  const hb = metrics?.latestHeartbeats?.[0];
+  $('heartbeatStatus').textContent = hb
+    ? `heartbeat: ${hb.agentId} ${hb.status} @ ${hb.at}`
+    : 'heartbeat: no runs yet';
 }
 
 function openDrawer(id) {

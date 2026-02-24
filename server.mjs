@@ -19,6 +19,7 @@ import {
   markInboxSeen,
   claimNext,
   recordHeartbeat,
+  getMetrics,
   db
 } from './lib/db.mjs';
 
@@ -101,6 +102,7 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, service: 'mission-control-lite', time: now() });
     }
     if (url.pathname === '/api/config' && req.method === 'GET') return send(res, 200, { readOnly: READ_ONLY });
+    if (url.pathname === '/api/metrics' && req.method === 'GET') return send(res, 200, getMetrics());
     if (url.pathname === '/api/tasks' && req.method === 'GET') return send(res, 200, { version: 1, tasks: listTasks() });
     if (url.pathname === '/api/agents' && req.method === 'GET') return send(res, 200, readJson(paths.agents));
     if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, { version: 1, events: listEvents(300) });
@@ -109,6 +111,16 @@ export const server = http.createServer(async (req, res) => {
       const agentId = url.pathname.split('/')[3];
       markInboxSeen(agentId);
       return send(res, 200, { agentId, tasks: agentInbox(agentId) });
+    }
+
+    if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/wake') && req.method === 'POST') {
+      const agentId = url.pathname.split('/')[3];
+      markInboxSeen(agentId);
+      const task = claimNext(agentId);
+      const summary = task ? `claimed ${task.id}` : 'no_actionable_tasks';
+      recordHeartbeat(agentId, 'ok', summary);
+      if (task) addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
+      return send(res, 200, { ok: true, agentId, task, inboxCount: agentInbox(agentId).length });
     }
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/claim-next') && req.method === 'POST') {

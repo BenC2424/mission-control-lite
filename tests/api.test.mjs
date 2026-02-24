@@ -95,3 +95,10 @@ test('assign -> inbox -> claim-next flow works', async () => {
   assert.equal(cl.ok, true);
   assert.equal(cl.task.id, c.task.id);
 });
+
+test('agent wake endpoint returns task or no_actionable_tasks', async () => {
+  const wake = await fetch(`${base}/api/agent/scout/wake`, { method: 'POST' });
+  assert.equal(wake.status, 200);
+  const w = await wake.json();
+  assert.equal(w.ok, true);
+});

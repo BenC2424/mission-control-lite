@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Mission Control Lite v1.1</title>
+    <title>Mission Control Lite v1.2</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -16,6 +16,8 @@
         <div class="metric"><span id="metric-agents">3</span><label>Agents</label></div>
         <div class="metric"><span id="metric-tasks">0</span><label>Tasks</label></div>
         <div class="metric"><span id="metric-inprogress">0</span><label>In Progress</label></div>
+        <div class="metric"><span id="metric-done">0</span><label>Done</label></div>
+        <div class="metric"><span id="metric-stale">0</span><label>Stale >24h</label></div>
       </div>
       <div class="actions">
         <span id="readonlyBadge" class="badge hidden">READ-ONLY</span>
@@ -54,6 +56,7 @@
       <aside class="panel agents"><h2>Agents</h2><div id="agentList"></div></aside>
       <section class="panel board"><h2>Mission Queue</h2><div class="kanban" id="kanban"></div></section>
       <aside class="panel feed"><h2>Live Feed</h2>
+        <div class="muted" id="heartbeatStatus">heartbeat: n/a</div>
         <label class="muted">Type
           <select id="feedType"><option value="all">all</option><option>task_created</option><option>task_updated</option><option>task_note</option><option>task_deleted</option><option>standup</option><option>import</option></select>
         </label>
