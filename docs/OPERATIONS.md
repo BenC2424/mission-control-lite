@@ -35,20 +35,45 @@ cd /home/ubuntu/.openclaw/workspace/mission-control-lite
 node scripts/validate-heartbeat-loop.mjs
 ```
 
-## 4) Logs
+## 4) Watchdog alerts (Phase 1 Step 3)
+
+Run manually:
+
+```bash
+cd /home/ubuntu/.openclaw/workspace/mission-control-lite
+npm run watchdog
+```
+
+Alert policy file:
+- `config/alert-policy.json`
+
+Suggested OpenClaw cron (every 5 min, alert-only):
+
+```bash
+openclaw cron add \
+  --name "mcl-watchdog" \
+  --agent main \
+  --cron "*/5 * * * *" \
+  --tz UTC \
+  --session isolated \
+  --message "Run: cd /home/ubuntu/.openclaw/workspace/mission-control-lite && npm run -s watchdog. If output starts with ALERT:, send it to Ben. Otherwise reply HEARTBEAT_OK." \
+  --announce
+```
+
+## 5) Logs
 
 ```bash
 sudo journalctl -u mission-control-lite -f
 ```
 
-## 5) Restart / stop
+## 6) Restart / stop
 
 ```bash
 sudo systemctl restart mission-control-lite
 sudo systemctl stop mission-control-lite
 ```
 
-## 6) Safety mode
+## 7) Safety mode
 
 For demo/read-only mode, edit service file and set:
 

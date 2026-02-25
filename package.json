@@ -1,6 +1,6 @@
 {
   "name": "mission-control-lite",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
     "wake:codi": "node scripts/agent-wake.mjs codi",
     "wake:scout": "node scripts/agent-wake.mjs scout",
     "healthcheck": "node scripts/healthcheck.mjs",
-    "validate:heartbeat": "node scripts/validate-heartbeat-loop.mjs"
+    "validate:heartbeat": "node scripts/validate-heartbeat-loop.mjs",
+    "watchdog": "node scripts/heartbeat-watchdog.mjs"
   }
 }
