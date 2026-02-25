@@ -20,6 +20,7 @@ import {
   claimNext,
   recordHeartbeat,
   getMetrics,
+  getEscalations,
   db
 } from './lib/db.mjs';
 
@@ -103,6 +104,7 @@ export const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/config' && req.method === 'GET') return send(res, 200, { readOnly: READ_ONLY });
     if (url.pathname === '/api/metrics' && req.method === 'GET') return send(res, 200, getMetrics());
+    if (url.pathname === '/api/escalations' && req.method === 'GET') return send(res, 200, { items: getEscalations(100) });
     if (url.pathname === '/api/tasks' && req.method === 'GET') return send(res, 200, { version: 1, tasks: listTasks() });
     if (url.pathname === '/api/agents' && req.method === 'GET') return send(res, 200, readJson(paths.agents));
     if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, { version: 1, events: listEvents(300) });

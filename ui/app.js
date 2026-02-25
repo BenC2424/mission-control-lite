@@ -7,6 +7,7 @@ let cachedAgents = [];
 let cachedEvents = [];
 let readOnly = false;
 let metrics = null;
+let escalations = [];
 let selectedId = null;
 let draggedTaskId = null;
 
@@ -30,18 +31,20 @@ async function api(path, opts = {}) {
 }
 
 async function loadData() {
-  const [t, a, ev, cfg, m] = await Promise.all([
+  const [t, a, ev, cfg, m, esc] = await Promise.all([
     api('/api/tasks'),
     api('/api/agents'),
     api('/api/activity'),
     api('/api/config'),
-    api('/api/metrics')
+    api('/api/metrics'),
+    api('/api/escalations')
   ]);
   cachedTasks = t.tasks ?? [];
   cachedAgents = a.agents ?? [];
   cachedEvents = ev.events ?? [];
   readOnly = Boolean(cfg.readOnly);
   metrics = m;
+  escalations = esc.items || [];
 }
 
 function filteredTasks() {
@@ -120,12 +123,24 @@ function renderMode() {
   });
 }
 
+function renderEscalations() {
+  const el = $('escalations');
+  if (!escalations.length) {
+    el.innerHTML = '<div class="muted">No escalations.</div>';
+    return;
+  }
+  el.innerHTML = escalations.slice(0, 20)
+    .map((e) => `<div class="feed-item"><strong>${e.reason}</strong><br/><span class="muted">${e.taskId} • ${e.owner}</span><br/>${e.title}</div>`)
+    .join('');
+}
+
 function renderMetrics() {
   const tasks = filteredTasks();
   $('metric-tasks').textContent = String(tasks.length);
   $('metric-inprogress').textContent = String(tasks.filter((t) => t.status === 'in_progress').length);
   $('metric-done').textContent = String(metrics?.tasks?.done ?? 0);
   $('metric-stale').textContent = String(metrics?.staleOpen ?? 0);
+  $('metric-escalations').textContent = String(metrics?.escalationCount ?? 0);
 
   const hb = metrics?.latestHeartbeats?.[0];
   $('heartbeatStatus').textContent = hb
@@ -162,7 +177,7 @@ async function refresh() {
   try {
     await loadData();
     clearError();
-    renderAgents(); renderBoard(); renderFeed(); renderMetrics(); renderMode();
+    renderAgents(); renderBoard(); renderFeed(); renderMetrics(); renderEscalations(); renderMode();
     if (selectedId) openDrawer(selectedId);
   } catch (e) {
     showError(`Refresh failed: ${e.message}`);
