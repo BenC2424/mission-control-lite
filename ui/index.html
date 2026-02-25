@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Mission Control Lite v1.2</title>
+    <title>Mission Control Lite v1.3</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -24,6 +24,8 @@
         <button id="newTaskBtn">+ New Task</button>
         <button id="refreshBtn">Refresh</button>
         <button id="standupBtn">Generate Standup</button>
+        <button id="wakeCodiBtn">Wake Codi</button>
+        <button id="wakeScoutBtn">Wake Scout</button>
         <button id="exportBtn">Export</button>
         <button id="importBtn">Import</button>
         <input id="importFile" type="file" accept="application/json" hidden />
@@ -57,8 +59,9 @@
       <section class="panel board"><h2>Mission Queue</h2><div class="kanban" id="kanban"></div></section>
       <aside class="panel feed"><h2>Live Feed</h2>
         <div class="muted" id="heartbeatStatus">heartbeat: n/a</div>
+        <div class="muted" id="assignmentHealth">assignment health: n/a</div>
         <label class="muted">Type
-          <select id="feedType"><option value="all">all</option><option>task_created</option><option>task_updated</option><option>task_note</option><option>task_deleted</option><option>standup</option><option>import</option></select>
+          <select id="feedType"><option value="all">all</option><option>task_created</option><option>task_assigned</option><option>task_claimed</option><option>task_updated</option><option>task_note</option><option>task_deleted</option><option>standup</option><option>import</option></select>
         </label>
         <div id="feed"></div>
       </aside>

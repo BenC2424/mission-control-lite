@@ -114,7 +114,7 @@ function renderMode() {
   if (readOnly) badge.classList.remove('hidden');
   else badge.classList.add('hidden');
 
-  ['newTaskBtn','saveTask','assignTask','deleteTask','saveNote','createTask','standupBtn','importBtn'].forEach((id) => {
+  ['newTaskBtn','saveTask','assignTask','deleteTask','saveNote','createTask','standupBtn','importBtn','wakeCodiBtn','wakeScoutBtn'].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = readOnly;
   });
@@ -131,6 +131,12 @@ function renderMetrics() {
   $('heartbeatStatus').textContent = hb
     ? `heartbeat: ${hb.agentId} ${hb.status} @ ${hb.at}`
     : 'heartbeat: no runs yet';
+
+  const a = metrics?.assignments || {};
+  const total = Number(a.totalAssignments || 0);
+  const completed = Number(a.completedAssignments || 0);
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+  $('assignmentHealth').textContent = `assignment health: ${completed}/${total} completed (${pct}%) • in-flight ${a.inFlightAssignments || 0}`;
 }
 
 function openDrawer(id) {
@@ -281,6 +287,22 @@ $('exportBtn').onclick = async () => {
 };
 
 $('importBtn').onclick = () => $('importFile').click();
+$('wakeCodiBtn').onclick = async () => {
+  try {
+    await api('/api/agent/codi/wake', { method: 'POST' });
+    await refresh();
+  } catch (e) {
+    showError(`Wake Codi failed: ${e.message}`);
+  }
+};
+$('wakeScoutBtn').onclick = async () => {
+  try {
+    await api('/api/agent/scout/wake', { method: 'POST' });
+    await refresh();
+  } catch (e) {
+    showError(`Wake Scout failed: ${e.message}`);
+  }
+};
 $('importFile').onchange = async (e) => {
   try {
     const file = e.target.files?.[0];
