@@ -20,8 +20,10 @@ import {
   claimNext,
   recordHeartbeat,
   getMetrics,
+  getEscalations,
   db
 } from './lib/db.mjs';
+import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
 const __dirname = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const HOST = '0.0.0.0';
@@ -103,6 +105,11 @@ export const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/config' && req.method === 'GET') return send(res, 200, { readOnly: READ_ONLY });
     if (url.pathname === '/api/metrics' && req.method === 'GET') return send(res, 200, getMetrics());
+    if (url.pathname === '/api/escalations' && req.method === 'GET') return send(res, 200, { items: getEscalations(100) });
+    if (url.pathname === '/api/orchestration/templates' && req.method === 'GET') {
+      const policy = loadPolicies();
+      return send(res, 200, { templates: Object.keys(policy.templates || {}) });
+    }
     if (url.pathname === '/api/tasks' && req.method === 'GET') return send(res, 200, { version: 1, tasks: listTasks() });
     if (url.pathname === '/api/agents' && req.method === 'GET') return send(res, 200, readJson(paths.agents));
     if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, { version: 1, events: listEvents(300) });
@@ -148,6 +155,28 @@ export const server = http.createServer(async (req, res) => {
       for (const id of body.agentIds) assignTask(body.taskId, id);
       addEvent({ type: 'task_assigned', message: `${body.taskId} assigned to ${body.agentIds.join(', ')}`, taskId: body.taskId, actor: body.actor || 'ui' });
       return send(res, 200, { ok: true, taskId: body.taskId, assigned: body.agentIds.length });
+    }
+
+    if (url.pathname === '/api/orchestrate' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const body = await parseBody(req);
+      if (!body.taskId || !body.template) {
+        return send(res, 400, { error: 'validation_failed', details: ['taskId and template required'] });
+      }
+      const task = listTasks().find((t) => t.id === body.taskId);
+      if (!task) return send(res, 404, { error: 'task not found' });
+
+      const plan = buildOrchestrationPlan({ taskId: task.id, template: body.template, title: task.title });
+
+      for (const w of plan.workers) {
+        const targetAgent = w.role.startsWith('codi') ? 'codi' : w.role.startsWith('scout') ? 'scout' : 'ultron';
+        assignTask(task.id, targetAgent);
+      }
+
+      addNote(task.id, `[ORCHESTRA:${plan.template}] workers=${plan.workers.map((w) => w.role).join(', ')} evidence=${plan.evidence.join(', ')}`, body.actor || 'ui.orchestrator');
+      addEvent({ type: 'orchestra_started', message: `${task.id} started ${plan.template} with ${plan.workers.length} workers`, taskId: task.id, actor: body.actor || 'ui.orchestrator' });
+
+      return send(res, 200, { ok: true, plan });
     }
 
     if (url.pathname === '/api/export' && req.method === 'GET') {

@@ -7,6 +7,8 @@ let cachedAgents = [];
 let cachedEvents = [];
 let readOnly = false;
 let metrics = null;
+let escalations = [];
+let orchestraTemplates = [];
 let selectedId = null;
 let draggedTaskId = null;
 
@@ -30,18 +32,22 @@ async function api(path, opts = {}) {
 }
 
 async function loadData() {
-  const [t, a, ev, cfg, m] = await Promise.all([
+  const [t, a, ev, cfg, m, esc, orch] = await Promise.all([
     api('/api/tasks'),
     api('/api/agents'),
     api('/api/activity'),
     api('/api/config'),
-    api('/api/metrics')
+    api('/api/metrics'),
+    api('/api/escalations'),
+    api('/api/orchestration/templates')
   ]);
   cachedTasks = t.tasks ?? [];
   cachedAgents = a.agents ?? [];
   cachedEvents = ev.events ?? [];
   readOnly = Boolean(cfg.readOnly);
   metrics = m;
+  escalations = esc.items || [];
+  orchestraTemplates = orch.templates || [];
 }
 
 function filteredTasks() {
@@ -114,10 +120,29 @@ function renderMode() {
   if (readOnly) badge.classList.remove('hidden');
   else badge.classList.add('hidden');
 
-  ['newTaskBtn','saveTask','assignTask','deleteTask','saveNote','createTask','standupBtn','importBtn','wakeCodiBtn','wakeScoutBtn'].forEach((id) => {
+  ['newTaskBtn','saveTask','assignTask','runOrchestra','deleteTask','saveNote','createTask','standupBtn','importBtn','wakeCodiBtn','wakeScoutBtn'].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = readOnly;
   });
+}
+
+function renderOrchestraTemplates() {
+  const sel = $('orchestraTemplate');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = orchestraTemplates.map((t) => `<option value="${t}">${t}</option>`).join('');
+  if (current && orchestraTemplates.includes(current)) sel.value = current;
+}
+
+function renderEscalations() {
+  const el = $('escalations');
+  if (!escalations.length) {
+    el.innerHTML = '<div class="muted">No escalations.</div>';
+    return;
+  }
+  el.innerHTML = escalations.slice(0, 20)
+    .map((e) => `<div class="feed-item"><strong>${e.reason}</strong><br/><span class="muted">${e.taskId} • ${e.owner}</span><br/>${e.title}</div>`)
+    .join('');
 }
 
 function renderMetrics() {
@@ -126,6 +151,7 @@ function renderMetrics() {
   $('metric-inprogress').textContent = String(tasks.filter((t) => t.status === 'in_progress').length);
   $('metric-done').textContent = String(metrics?.tasks?.done ?? 0);
   $('metric-stale').textContent = String(metrics?.staleOpen ?? 0);
+  $('metric-escalations').textContent = String(metrics?.escalationCount ?? 0);
 
   const hb = metrics?.latestHeartbeats?.[0];
   $('heartbeatStatus').textContent = hb
@@ -162,7 +188,7 @@ async function refresh() {
   try {
     await loadData();
     clearError();
-    renderAgents(); renderBoard(); renderFeed(); renderMetrics(); renderMode();
+    renderAgents(); renderBoard(); renderFeed(); renderMetrics(); renderEscalations(); renderOrchestraTemplates(); renderMode();
     if (selectedId) openDrawer(selectedId);
   } catch (e) {
     showError(`Refresh failed: ${e.message}`);
@@ -229,6 +255,21 @@ $('assignTask').onclick = async () => {
     await refresh();
   } catch (e) {
     showError(`Assign failed: ${e.message}`);
+  }
+};
+
+$('runOrchestra').onclick = async () => {
+  try {
+    if (!selectedId) return;
+    const template = $('orchestraTemplate').value;
+    if (!template) return showError('No orchestra template selected');
+    await api('/api/orchestrate', {
+      method: 'POST',
+      body: JSON.stringify({ taskId: selectedId, template, actor: 'ui.orchestra' })
+    });
+    await refresh();
+  } catch (e) {
+    showError(`Orchestra failed: ${e.message}`);
   }
 };
 
