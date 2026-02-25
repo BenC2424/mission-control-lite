@@ -1,4 +1,4 @@
-# Mission Control Lite v1.6
+# Mission Control Lite v1.7
 
 Lean local-first multi-agent operating system for Ultron + Codi + Scout.
 
@@ -29,7 +29,7 @@ READ_ONLY=1 npm run start
 
 Open: `http://localhost:8787/ui/index.html`
 
-## v1.6 highlights
+## v1.7 highlights
 - Health endpoint: `GET /api/health`
 - Runtime config endpoint: `GET /api/config` (supports read-only mode)
 - SQLite-backed local datastore (`runtime/mission-control.sqlite`) with WAL mode
@@ -56,6 +56,8 @@ Open: `http://localhost:8787/ui/index.html`
 - `POST /api/orchestrate` to apply deterministic multi-worker plans to tasks
 - Operations runbook + systemd unit template for persistent service management
 - New scripts: `npm run healthcheck` and `npm run validate:heartbeat` for live loop verification
+- Watchdog alerting: `npm run watchdog` with policy file `config/alert-policy.json`
+- OpenClaw cron pattern for alert-only heartbeat/workflow monitoring
 - Feed filter includes assignment/claim workflow events
 - API integration tests for health + config + invalid create + delete + export + assign/inbox/claim + metrics/escalations + orchestration flow (`npm test`)
 

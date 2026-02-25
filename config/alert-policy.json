@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "heartbeatMaxAgeMinutes": 20,
+  "maxNoActionableStreak": 8,
+  "maxEscalations": 0,
+  "maxStaleOpen": 0,
+  "agents": ["codi", "scout"]
+}
