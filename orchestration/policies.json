@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "defaults": {
+    "maxWorkers": 3,
+    "timeoutMinutes": 30,
+    "requireEvidence": true,
+    "singleWriter": true,
+    "orchestrator": "ultron"
+  },
+  "templates": {
+    "research_orchestra": {
+      "maxWorkers": 3,
+      "timeoutMinutes": 25,
+      "workers": [
+        { "role": "scout-source-scan", "goal": "collect primary sources and constraints" },
+        { "role": "scout-synthesis", "goal": "synthesize findings with confidence levels" },
+        { "role": "ultron-review", "goal": "final recommendation and decision options" }
+      ],
+      "evidence": ["source_urls", "confidence_scores", "decision_summary"]
+    },
+    "build_orchestra": {
+      "maxWorkers": 3,
+      "timeoutMinutes": 35,
+      "workers": [
+        { "role": "codi-implement", "goal": "implement minimal safe change" },
+        { "role": "codi-verify", "goal": "run tests/checks and collect logs" },
+        { "role": "ultron-approve", "goal": "approve only with evidence" }
+      ],
+      "evidence": ["diff_summary", "test_output", "risk_notes"]
+    },
+    "incident_orchestra": {
+      "maxWorkers": 3,
+      "timeoutMinutes": 20,
+      "workers": [
+        { "role": "scout-triage", "goal": "identify blast radius and timeline" },
+        { "role": "codi-remediate", "goal": "apply fix and verify rollback path" },
+        { "role": "ultron-commander", "goal": "choose mitigation and next actions" }
+      ],
+      "evidence": ["impact_assessment", "fix_validation", "rollback_plan"]
+    }
+  }
+}

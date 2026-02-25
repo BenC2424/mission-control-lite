@@ -115,3 +115,27 @@ test('metrics and escalations endpoints respond', async () => {
   const ej = await e.json();
   assert.equal(Array.isArray(ej.items), true);
 });
+
+test('orchestration templates + run endpoint works', async () => {
+  const tpl = await fetch(`${base}/api/orchestration/templates`);
+  assert.equal(tpl.status, 200);
+  const tj = await tpl.json();
+  assert.equal(Array.isArray(tj.templates), true);
+
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Orchestrate me', status: 'assigned', owner: 'ultron', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const run = await fetch(`${base}/api/orchestrate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskId: c.task.id, template: 'build_orchestra' })
+  });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(rj.ok, true);
+  assert.equal(rj.plan.template, 'build_orchestra');
+});
