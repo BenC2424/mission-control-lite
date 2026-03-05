@@ -1,5 +1,6 @@
-const statuses = ['inbox','assigned','in_progress','review','blocked','done'];
-const statusTitles = { inbox:'Inbox', assigned:'Assigned', in_progress:'In Progress', review:'Review', blocked:'Blocked', done:'Done' };
+const statuses = ['inbox','assigned','in_progress','review','blocked','done','archived'];
+const statusTitles = { inbox:'Inbox', assigned:'Assigned', in_progress:'In Progress', review:'Review', blocked:'Blocked', done:'Done', archived:'Archived' };
+const priorityLabel = { p0:'Highest', p1:'High', p2:'Low', p3:'Lowest' };
 const $ = (id) => document.getElementById(id);
 
 let cachedTasks = [];
@@ -9,20 +10,55 @@ let readOnly = false;
 let metrics = null;
 let escalations = [];
 let orchestraTemplates = [];
+let kpiDashboard = null;
 let selectedId = null;
 let draggedTaskId = null;
 
-const filters = { owner: 'all', status: 'all', priority: 'all', search: '' };
+const filters = { owner: 'all', status: 'all', priority: 'all', search: '', showArchived: false };
 let feedType = 'all';
+let feedLimit = 25;
 
-function showError(message) {
+const agentTone = {
+  ultron: 'agent-ultron',
+  codi: 'agent-codi',
+  scout: 'agent-scout',
+  ops: 'agent-ops'
+};
+
+function ownerChip(owner) {
+  const tone = agentTone[owner] || '';
+  return `<span class="owner-chip ${tone}">${owner}</span>`;
+}
+
+function actorChip(actor = 'system') {
+  const root = String(actor).split('.')[0];
+  const tone = agentTone[root] || '';
+  return `<span class="actor-chip ${tone}">${actor}</span>`;
+}
+
+function showFlash(message, level = 'error') {
   const el = $('flash');
   el.textContent = message;
-  el.classList.remove('hidden');
+  el.classList.remove('hidden', 'ok', 'info', 'error');
+  el.classList.add(level);
+}
+
+function showError(message) {
+  showFlash(message, 'error');
+}
+
+function showOk(message) {
+  showFlash(message, 'ok');
+}
+
+function showInfo(message) {
+  showFlash(message, 'info');
 }
 
 function clearError() {
-  $('flash').classList.add('hidden');
+  const el = $('flash');
+  el.classList.add('hidden');
+  el.classList.remove('ok', 'info', 'error');
 }
 
 async function api(path, opts = {}) {
@@ -32,27 +68,46 @@ async function api(path, opts = {}) {
 }
 
 async function loadData() {
-  const [t, a, ev, cfg, m, esc, orch] = await Promise.all([
+  // core endpoints (must have)
+  const [t, a, ev, cfg] = await Promise.all([
     api('/api/tasks'),
     api('/api/agents'),
     api('/api/activity'),
-    api('/api/config'),
+    api('/api/config')
+  ]);
+
+  // optional endpoints (degrade gracefully if backend is older/mid-restart)
+  const [mRes, escRes, orchRes, kpiRes] = await Promise.allSettled([
     api('/api/metrics'),
     api('/api/escalations'),
-    api('/api/orchestration/templates')
+    api('/api/orchestration/templates'),
+    api('/api/kpi/dashboard', {
+      method: 'POST',
+      body: JSON.stringify({
+        current: {},
+        baseline: {}
+      })
+    })
   ]);
+
   cachedTasks = t.tasks ?? [];
   cachedAgents = a.agents ?? [];
   cachedEvents = ev.events ?? [];
   readOnly = Boolean(cfg.readOnly);
-  metrics = m;
-  escalations = esc.items || [];
-  orchestraTemplates = orch.templates || [];
+
+  metrics = mRes.status === 'fulfilled'
+    ? mRes.value
+    : { tasks: { done: 0 }, staleOpen: 0, escalationCount: 0, latestHeartbeats: [], assignments: {} };
+
+  escalations = escRes.status === 'fulfilled' ? (escRes.value.items || []) : [];
+  orchestraTemplates = orchRes.status === 'fulfilled' ? (orchRes.value.templates || []) : [];
+  kpiDashboard = kpiRes.status === 'fulfilled' ? (kpiRes.value.dashboard || null) : null;
 }
 
 function filteredTasks() {
   const query = filters.search.trim().toLowerCase();
   return cachedTasks.filter((t) =>
+    (filters.showArchived || t.status !== 'archived') &&
     (filters.owner === 'all' || t.owner === filters.owner) &&
     (filters.status === 'all' || t.status === filters.status) &&
     (filters.priority === 'all' || t.priority === filters.priority) &&
@@ -67,8 +122,8 @@ function renderAgents() {
     const blocked = owned.some((t) => t.status === 'blocked');
     const working = owned.some((t) => ['assigned','in_progress','review'].includes(t.status));
     const status = blocked ? 'blocked' : working ? 'working' : 'idle';
-    const div = document.createElement('div'); div.className = 'agent';
-    div.innerHTML = `<div><strong>${a.id}</strong> <span class="badge ${status}">${status}</span></div><div class="muted">${a.role}</div><div class="muted">tasks: ${owned.length}</div>`;
+    const div = document.createElement('div'); div.className = `agent ${agentTone[a.id] || ''}`;
+    div.innerHTML = `<div>${ownerChip(a.id)} <span class="badge ${status}">${status}</span></div><div class="muted">${a.role}</div><div class="muted">tasks: ${owned.length}</div>`;
     list.appendChild(div);
   }
 }
@@ -76,7 +131,8 @@ function renderAgents() {
 function renderBoard() {
   const tasks = filteredTasks();
   const kanban = $('kanban'); kanban.innerHTML = '';
-  for (const status of statuses) {
+  const visibleStatuses = filters.showArchived ? statuses : statuses.filter((s) => s !== 'archived');
+  for (const status of visibleStatuses) {
     const col = document.createElement('div'); col.className = 'col';
     col.dataset.status = status;
     col.addEventListener('dragover', (e) => e.preventDefault());
@@ -95,7 +151,7 @@ function renderBoard() {
       const card = document.createElement('div'); card.className = 'card';
       card.draggable = true;
       card.addEventListener('dragstart', () => { draggedTaskId = t.id; });
-      card.innerHTML = `<div class="title">${t.title}</div><div class="meta">${t.id} • ${t.owner} • ${t.priority}</div>`;
+      card.innerHTML = `<div class="title">${t.title}</div><div class="meta">${t.id} • ${ownerChip(t.owner)} • ${t.priority}</div>`;
       card.onclick = () => openDrawer(t.id);
       col.appendChild(card);
     });
@@ -107,10 +163,10 @@ function renderFeed() {
   const feed = $('feed'); feed.innerHTML = '';
   cachedEvents
     .filter((e) => feedType === 'all' || e.type === feedType)
-    .slice(0, 30)
+    .slice(0, feedLimit)
     .forEach((e) => {
       const div = document.createElement('div'); div.className = 'feed-item';
-      div.innerHTML = `<strong>${e.type}</strong><br/><span class="muted">${e.message}</span><br/><span class="muted">${e.at}</span>`;
+      div.innerHTML = `<strong>${e.type}</strong> ${actorChip(e.actor)}<br/><span class="muted">${e.message}</span><br/><span class="muted">${e.at}</span>`;
       feed.appendChild(div);
     });
 }
@@ -120,7 +176,7 @@ function renderMode() {
   if (readOnly) badge.classList.remove('hidden');
   else badge.classList.add('hidden');
 
-  ['newTaskBtn','saveTask','assignTask','runOrchestra','deleteTask','saveNote','createTask','standupBtn','importBtn','wakeCodiBtn','wakeScoutBtn'].forEach((id) => {
+  ['newTaskBtn','saveTask','assignTask','runOrchestra','deleteTask','saveNote','createTask','standupBtn','archiveDoneBtn','importBtn','wakeCodiBtn','wakeScoutBtn'].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = readOnly;
   });
@@ -141,12 +197,38 @@ function renderEscalations() {
     return;
   }
   el.innerHTML = escalations.slice(0, 20)
-    .map((e) => `<div class="feed-item"><strong>${e.reason}</strong><br/><span class="muted">${e.taskId} • ${e.owner}</span><br/>${e.title}</div>`)
+    .map((e) => `<div class="feed-item"><strong>${e.reason}</strong><br/><span class="muted">${e.taskId} • ${ownerChip(e.owner || 'unowned')}</span><br/>${e.title}</div>`)
     .join('');
+}
+
+function renderKpiDashboard() {
+  const el = $('kpiDashboard');
+  if (!el) return;
+  const generated = $('kpiGeneratedAt');
+  if (!kpiDashboard?.metrics) {
+    el.innerHTML = '<div class="muted">KPI dashboard unavailable.</div>';
+    if (generated) generated.textContent = 'Not available';
+    return;
+  }
+
+  const order = kpiDashboard.order || Object.keys(kpiDashboard.metrics);
+  el.innerHTML = order
+    .map((key) => {
+      const metric = kpiDashboard.metrics[key];
+      if (!metric) return '';
+      const delta = Number(metric.delta || 0);
+      const deltaClass = delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat';
+      const sign = delta > 0 ? '+' : '';
+      return `<div class="kpi-card"><div class="kpi-name">${metric.label}</div><div class="kpi-value">${metric.value}${metric.unit || ''}</div><div class="kpi-delta ${deltaClass}">${sign}${delta.toFixed(1)}pp vs baseline</div></div>`;
+    })
+    .join('');
+
+  if (generated) generated.textContent = kpiDashboard.generatedAt || 'n/a';
 }
 
 function renderMetrics() {
   const tasks = filteredTasks();
+  $('metric-agents').textContent = String(cachedAgents.length);
   $('metric-tasks').textContent = String(tasks.length);
   $('metric-inprogress').textContent = String(tasks.filter((t) => t.status === 'in_progress').length);
   $('metric-done').textContent = String(metrics?.tasks?.done ?? 0);
@@ -172,6 +254,7 @@ function openDrawer(id) {
   $('drawer').classList.remove('hidden');
   $('d-title').textContent = t.title;
   $('d-id').textContent = `${t.id} • updated ${t.updatedAt || ''}`;
+  $('d-description').value = t.description || '';
   $('d-status').value = t.status;
   $('d-owner').value = t.owner;
   $('d-priority').value = t.priority || 'p2';
@@ -180,7 +263,7 @@ function openDrawer(id) {
 
   const events = cachedEvents.filter((e) => e.taskId === t.id).slice(0, 15);
   $('d-activity').innerHTML = events.length
-    ? events.map((e) => `<div class="note"><div class="muted">${e.at} • ${e.type}</div>${e.message}</div>`).join('')
+    ? events.map((e) => `<div class="note"><div class="muted">${e.at} • ${e.type} • ${e.actor || 'system'}</div>${e.message}</div>`).join('')
     : '<div class="muted">No activity yet.</div>';
 }
 
@@ -188,8 +271,16 @@ async function refresh() {
   try {
     await loadData();
     clearError();
-    renderAgents(); renderBoard(); renderFeed(); renderMetrics(); renderEscalations(); renderOrchestraTemplates(); renderMode();
-    if (selectedId) openDrawer(selectedId);
+    renderAgents(); renderBoard(); renderFeed(); renderMetrics(); renderEscalations(); renderKpiDashboard(); renderOrchestraTemplates(); renderMode();
+
+    if (selectedId) {
+      const exists = cachedTasks.some((t) => t.id === selectedId);
+      if (exists) openDrawer(selectedId);
+      else {
+        selectedId = null;
+        $('drawer').classList.add('hidden');
+      }
+    }
   } catch (e) {
     showError(`Refresh failed: ${e.message}`);
   }
@@ -199,7 +290,9 @@ $('filterOwner').onchange = (e) => { filters.owner = e.target.value; renderBoard
 $('filterStatus').onchange = (e) => { filters.status = e.target.value; renderBoard(); renderMetrics(); };
 $('filterPriority').onchange = (e) => { filters.priority = e.target.value; renderBoard(); renderMetrics(); };
 $('filterSearch').oninput = (e) => { filters.search = e.target.value; renderBoard(); renderMetrics(); };
+$('showArchived').onchange = (e) => { filters.showArchived = Boolean(e.target.checked); renderBoard(); renderMetrics(); };
 $('feedType').onchange = (e) => { feedType = e.target.value; renderFeed(); };
+$('feedLimit').onchange = (e) => { feedLimit = Number(e.target.value || 25); renderFeed(); };
 
 $('newTaskBtn').onclick = () => { if (!readOnly) $('createModal').classList.remove('hidden'); };
 $('closeCreate').onclick = () => $('createModal').classList.add('hidden');
@@ -209,12 +302,14 @@ $('createTask').onclick = async () => {
     if (!title) return alert('Title required');
     await api('/api/task/create', { method: 'POST', body: JSON.stringify({
       title,
+      description: $('c-description').value,
       owner: $('c-owner').value,
       status: $('c-status').value,
       priority: $('c-priority').value,
       actor: 'ui.create'
     })});
     $('c-title').value = '';
+    $('c-description').value = '';
     $('createModal').classList.add('hidden');
     await refresh();
   } catch (e) {
@@ -223,7 +318,22 @@ $('createTask').onclick = async () => {
 };
 
 $('refreshBtn').onclick = refresh;
-$('closeDrawer').onclick = () => $('drawer').classList.add('hidden');
+$('archiveDoneBtn').onclick = async () => {
+  try {
+    const ok = confirm('Archive all completed tasks?');
+    if (!ok) return;
+    showInfo('Archiving completed tasks...');
+    const out = await api('/api/tasks/archive-done', { method: 'POST' });
+    await refresh();
+    showOk(`Archived ${out.archived ?? 0} completed task(s).`);
+  } catch (e) {
+    showError(`Archive failed: ${e.message}`);
+  }
+};
+$('closeDrawer').onclick = () => {
+  $('drawer').classList.add('hidden');
+  selectedId = null;
+};
 
 $('saveTask').onclick = async () => {
   try {
@@ -234,6 +344,7 @@ $('saveTask').onclick = async () => {
         id: selectedId,
         status: $('d-status').value,
         owner: $('d-owner').value,
+        description: $('d-description').value,
         priority: $('d-priority').value,
         actor: 'ui.drawer'
       })
@@ -330,16 +441,20 @@ $('exportBtn').onclick = async () => {
 $('importBtn').onclick = () => $('importFile').click();
 $('wakeCodiBtn').onclick = async () => {
   try {
-    await api('/api/agent/codi/wake', { method: 'POST' });
+    showInfo('Waking Codi...');
+    const out = await api('/api/agent/codi/wake', { method: 'POST' });
     await refresh();
+    showOk(out.task ? `Codi claimed ${out.task.id}.` : 'Codi wake complete: no actionable tasks.');
   } catch (e) {
     showError(`Wake Codi failed: ${e.message}`);
   }
 };
 $('wakeScoutBtn').onclick = async () => {
   try {
-    await api('/api/agent/scout/wake', { method: 'POST' });
+    showInfo('Waking Scout...');
+    const out = await api('/api/agent/scout/wake', { method: 'POST' });
     await refresh();
+    showOk(out.task ? `Scout claimed ${out.task.id}.` : 'Scout wake complete: no actionable tasks.');
   } catch (e) {
     showError(`Wake Scout failed: ${e.message}`);
   }
@@ -373,6 +488,7 @@ document.addEventListener('keydown', async (e) => {
   if (e.key === 'Escape') {
     $('drawer').classList.add('hidden');
     $('createModal').classList.add('hidden');
+    selectedId = null;
     return;
   }
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
