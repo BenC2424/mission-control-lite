@@ -8,18 +8,39 @@ h1{margin:0;font-size:1.15rem}.muted{margin:2px 0 0;color:var(--muted);font-size
 button.danger{border-color:#e5a3a3;background:#fff3f3;color:#8b1f1f}
 .hidden{display:none}
 .flash{margin:10px 12px 0;padding:8px 10px;border-radius:10px;border:1px solid #f0c5c5;background:#fff2f2;color:#7a2020;font-size:.85rem}
+.flash.error{border-color:#f0c5c5;background:#fff2f2;color:#7a2020}
+.flash.ok{border-color:#a8dfc7;background:#eefaf3;color:#145b38}
+.flash.info{border-color:#cbd9f5;background:#f2f6ff;color:#1f4f97}
 .flash.hidden{display:none}
 .filters{margin:10px 12px 0;display:flex;gap:12px;align-items:end}
 .filters label{display:grid;gap:4px;font-size:.85rem}
-.layout{display:grid;grid-template-columns:260px 1fr 320px;gap:12px;padding:12px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px}
+.layout{display:grid;grid-template-columns:260px 1fr 320px;gap:12px;padding:12px;align-items:start}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px}
 .panel h2{font-size:.95rem;margin:4px 0 10px}.agent{border:1px solid var(--line);border-radius:10px;padding:8px;margin-bottom:8px}
+.agent.agent-ultron{border-left:4px solid #7a4cff}
+.agent.agent-codi{border-left:4px solid #1f9d8b}
+.agent.agent-scout{border-left:4px solid #c5841a}
+.agent.agent-ops{border-left:4px solid #cc3d7a}
 .badge{display:inline-block;border-radius:999px;padding:2px 8px;font-size:.72rem;border:1px solid var(--line)}
+.owner-chip,.actor-chip{display:inline-block;padding:1px 8px;border-radius:999px;font-size:.75rem;font-weight:600;border:1px solid var(--line);background:#f4f2ea;color:#4f4c43}
+.owner-chip.agent-ultron,.actor-chip.agent-ultron{background:#f1ebff;border-color:#c7b0ff;color:#4a2ca3}
+.owner-chip.agent-codi,.actor-chip.agent-codi{background:#e9fbf7;border-color:#9fe3d5;color:#0d6559}
+.owner-chip.agent-scout,.actor-chip.agent-scout{background:#fff6e8;border-color:#f1ca85;color:#8b5c11}
+.owner-chip.agent-ops,.actor-chip.agent-ops{background:#ffeaf3;border-color:#f2b2cc;color:#8d1f55}
 .badge.working{color:#0b6b49;border-color:#8cd8b9;background:#edf9f3}.badge.idle{color:#6c6654;background:#f7f5ef}.badge.blocked{color:#8e2a2a;border-color:#f0b8b8;background:#fff1f1}
 .kanban{display:grid;grid-template-columns:repeat(6,minmax(180px,1fr));gap:10px;overflow-x:auto}
 .col{background:#fcfbf8;border:1px solid var(--line);border-radius:10px;padding:8px;min-height:420px}.col h3{margin:0 0 8px;font-size:.8rem;color:#49493f;text-transform:uppercase}
 .card{border:1px solid var(--line);border-radius:10px;padding:8px;background:#fff;margin-bottom:8px;cursor:pointer}.card .title{font-weight:600;font-size:.88rem}.card .meta{font-size:.78rem;color:var(--muted);margin-top:4px}
+#feed{max-height:520px;overflow:auto;padding-right:4px}
 .feed-item{border-bottom:1px solid var(--line);padding:8px 2px;font-size:.87rem}.standup{margin:0 12px 12px}pre{margin:0;white-space:pre-wrap;background:#fbfaf6;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:.86rem}
 .drawer{position:fixed;top:0;right:0;width:360px;height:100%;background:#fff;border-left:1px solid var(--line);padding:12px;z-index:50;box-shadow:-8px 0 18px rgba(0,0,0,.08)}
 .drawer.hidden{display:none}.drawer-head{display:flex;justify-content:space-between;align-items:center}.drawer-body{display:grid;gap:10px;margin-top:10px}
 .drawer label{display:grid;gap:5px;font-size:.88rem}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:8px;background:#fff}#d-notes,#d-activity{max-height:180px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px}
 .note{border-bottom:1px solid var(--line);padding:6px 0}.note:last-child{border-bottom:0}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:10px}
+.kpi-card{border:1px solid var(--line);border-radius:10px;padding:10px;background:#fbfaf6}
+.kpi-name{font-size:.82rem;color:var(--muted);margin-bottom:4px}
+.kpi-value{font-size:1.2rem;font-weight:700}
+.kpi-delta{font-size:.8rem;margin-top:4px}
+.kpi-delta.up{color:#0b6b49}
+.kpi-delta.down{color:#8e2a2a}
+.kpi-delta.flat{color:#6c6654}

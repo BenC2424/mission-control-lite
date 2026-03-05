@@ -4,13 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mission Control Lite v1.7</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="/ui/styles.css" />
   </head>
   <body>
     <header class="topbar">
       <div>
         <h1>Mission Control Lite</h1>
-        <p class="muted">Ultron • Codi • Scout</p>
+        <p class="muted">Ultron • Codi • Scout • Ops</p>
       </div>
       <div class="metrics">
         <div class="metric"><span id="metric-agents">3</span><label>Agents</label></div>
@@ -25,6 +25,7 @@
         <button id="newTaskBtn">+ New Task</button>
         <button id="refreshBtn">Refresh</button>
         <button id="standupBtn">Generate Standup</button>
+        <button id="archiveDoneBtn">Archive Done</button>
         <button id="wakeCodiBtn">Wake Codi</button>
         <button id="wakeScoutBtn">Wake Scout</button>
         <button id="exportBtn">Export</button>
@@ -37,7 +38,7 @@
     <div class="filters panel">
       <label>Owner
         <select id="filterOwner">
-          <option value="all">all</option><option value="ultron">ultron</option><option value="codi">codi</option><option value="scout">scout</option>
+          <option value="all">all</option><option value="ultron">ultron</option><option value="codi">codi</option><option value="scout">scout</option><option value="ops">ops</option>
         </select>
       </label>
       <label>Status
@@ -47,11 +48,18 @@
       </label>
       <label>Priority
         <select id="filterPriority">
-          <option value="all">all</option><option>p0</option><option>p1</option><option>p2</option><option>p3</option>
+          <option value="all">all</option>
+          <option value="p3">Lowest</option>
+          <option value="p2">Low</option>
+          <option value="p1">High</option>
+          <option value="p0">Highest</option>
         </select>
       </label>
       <label>Search
         <input id="filterSearch" type="text" placeholder="title or id" />
+      </label>
+      <label>
+        <input id="showArchived" type="checkbox" /> Show archived
       </label>
     </div>
 
@@ -63,6 +71,9 @@
         <div class="muted" id="assignmentHealth">assignment health: n/a</div>
         <label class="muted">Type
           <select id="feedType"><option value="all">all</option><option>task_created</option><option>task_assigned</option><option>task_claimed</option><option>task_updated</option><option>task_note</option><option>task_deleted</option><option>standup</option><option>import</option></select>
+        </label>
+        <label class="muted">Items
+          <select id="feedLimit"><option>10</option><option selected>25</option><option>50</option></select>
         </label>
         <div id="feed"></div>
       </aside>
@@ -78,16 +89,23 @@
       <div id="escalations">No escalations.</div>
     </section>
 
+    <section class="panel standup">
+      <h2>Gym KPI Dashboard v1</h2>
+      <div class="muted">Generated: <span id="kpiGeneratedAt">n/a</span></div>
+      <div id="kpiDashboard" class="kpi-grid"></div>
+    </section>
+
     <aside id="drawer" class="drawer hidden">
       <div class="drawer-head"><strong id="d-title">Task</strong><button id="closeDrawer">Close</button></div>
       <div class="drawer-body">
         <div class="muted" id="d-id"></div>
-        <label>Status<select id="d-status"><option>inbox</option><option>assigned</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option></select></label>
-        <label>Owner<select id="d-owner"><option>ultron</option><option>codi</option><option>scout</option></select></label>
-        <label>Priority<select id="d-priority"><option>p0</option><option>p1</option><option>p2</option><option>p3</option></select></label>
+        <label>Description<textarea id="d-description" rows="4" placeholder="Task details..."></textarea></label>
+        <label>Status<select id="d-status"><option>inbox</option><option>assigned</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option><option>archived</option></select></label>
+        <label>Owner<select id="d-owner"><option>ultron</option><option>codi</option><option>scout</option><option>ops</option></select></label>
+        <label>Priority<select id="d-priority"><option value="p3">Lowest</option><option value="p2">Low</option><option value="p1">High</option><option value="p0">Highest</option></select></label>
         <button id="saveTask">Save Task</button>
         <label>Assign to agent
-          <select id="assignAgent"><option>ultron</option><option>codi</option><option>scout</option></select>
+          <select id="assignAgent"><option>ultron</option><option>codi</option><option>scout</option><option>ops</option></select>
         </label>
         <button id="assignTask">Assign Task</button>
         <label>Orchestra template
@@ -106,13 +124,14 @@
       <div class="drawer-head"><strong>Create Task</strong><button id="closeCreate">Close</button></div>
       <div class="drawer-body">
         <label>Title<input id="c-title" type="text" placeholder="Task title" /></label>
-        <label>Owner<select id="c-owner"><option>ultron</option><option>codi</option><option>scout</option></select></label>
+        <label>Description<textarea id="c-description" rows="4" placeholder="What exactly needs to be done?"></textarea></label>
+        <label>Owner<select id="c-owner"><option>ultron</option><option>codi</option><option>scout</option><option>ops</option></select></label>
         <label>Status<select id="c-status"><option>inbox</option><option>assigned</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option></select></label>
-        <label>Priority<select id="c-priority"><option>p0</option><option>p1</option><option selected>p2</option><option>p3</option></select></label>
+        <label>Priority<select id="c-priority"><option value="p3">Lowest</option><option value="p2" selected>Low</option><option value="p1">High</option><option value="p0">Highest</option></select></label>
         <button id="createTask">Create</button>
       </div>
     </aside>
 
-    <script type="module" src="./app.js"></script>
+    <script type="module" src="/ui/app.js"></script>
   </body>
 </html>
