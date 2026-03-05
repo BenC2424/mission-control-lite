@@ -27,12 +27,19 @@ Optional read-only demo mode:
 READ_ONLY=1 npm run start
 ```
 
+Optional Postgres mode:
+```bash
+MCL_DB=postgres DATABASE_URL=postgres://user:pass@host:5432/dbname npm run start
+```
+
 Open: `http://localhost:8787/ui/index.html`
 
 ## v1.7 highlights
 - Health endpoint: `GET /api/health`
 - Runtime config endpoint: `GET /api/config` (supports read-only mode)
-- SQLite-backed local datastore (`runtime/mission-control.sqlite`) with WAL mode
+- Configurable datastore backend:
+  - default SQLite (`runtime/mission-control.sqlite`) with WAL mode
+  - Postgres when `MCL_DB=postgres` and `DATABASE_URL` are set
 - Strong API validation for task create/update
 - Activity persistence with structured events
 - UI task create modal + filters + detail drawer edits

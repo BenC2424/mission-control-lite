@@ -24,6 +24,14 @@
       "capabilities": ["web-research", "synthesis", "source-validation"],
       "canExternalMessage": false,
       "canDestructive": false
+    },
+    {
+      "id": "ops",
+      "sessionKey": "agent:main:subagent:ops",
+      "role": "operations",
+      "capabilities": ["ops", "triage", "governance", "watchdog"],
+      "canExternalMessage": false,
+      "canDestructive": false
     }
   ]
 }
