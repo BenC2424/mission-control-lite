@@ -2,12 +2,7 @@
 "functions": {
 "server.mjs": {
 "runtime": "nodejs22.x",
-"includeFiles": [
-"ui/**",
-"runtime/**",
-"config/**",
-"lib/**"
-]
+"includeFiles": "{ui/**,runtime/**,config/**,lib/**}"
 }
 },
 "rewrites": [
