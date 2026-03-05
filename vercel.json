@@ -1,10 +1,20 @@
 {
-"functions": {
-"server.mjs": {
-"includeFiles": "{ui/**,runtime/**,config/**,lib/**}"
+"version": 2,
+"builds": [
+{
+"src": "server.mjs",
+"use": "@vercel/node",
+"config": {
+"includeFiles": [
+"ui/**",
+"runtime/**",
+"config/**",
+"lib/**"
+]
 }
-},
-"rewrites": [
-{ "source": "/(.*)", "destination": "/server.mjs" }
+}
+],
+"routes": [
+{ "src": "/(.*)", "dest": "/server.mjs" }
 ]
 }
