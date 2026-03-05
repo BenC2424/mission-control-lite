@@ -21,7 +21,7 @@ import {
   recordHeartbeat,
   getMetrics,
   getEscalations,
-  db
+  clearAllData
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -48,7 +48,7 @@ const mime = {
 const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
 const writeJson = (p, v) => writeFileSync(p, JSON.stringify(v, null, 2) + '\n');
 const now = () => new Date().toISOString();
-seedFromJsonIfEmpty();
+await seedFromJsonIfEmpty();
 
 function send(res, status, body, type = 'application/json; charset=utf-8') {
   res.writeHead(status, { 'Content-Type': type, 'Access-Control-Allow-Origin': '*' });
@@ -71,8 +71,8 @@ function parseBody(req) {
   });
 }
 
-function logEvent(type, message, taskId = null, actor = 'system') {
-  addEvent({ type, message, taskId, actor });
+async function logEvent(type, message, taskId = null, actor = 'system') {
+  await addEvent({ type, message, taskId, actor });
 }
 
 function getStandup(tasks) {
@@ -104,45 +104,59 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, service: 'mission-control-lite', time: now() });
     }
     if (url.pathname === '/api/config' && req.method === 'GET') return send(res, 200, { readOnly: READ_ONLY });
-    if (url.pathname === '/api/metrics' && req.method === 'GET') return send(res, 200, getMetrics());
-    if (url.pathname === '/api/escalations' && req.method === 'GET') return send(res, 200, { items: getEscalations(100) });
+    if (url.pathname === '/api/metrics' && req.method === 'GET') return send(res, 200, await getMetrics());
+    if (url.pathname === '/api/escalations' && req.method === 'GET') return send(res, 200, { items: await getEscalations(100) });
     if (url.pathname === '/api/orchestration/templates' && req.method === 'GET') {
       const policy = loadPolicies();
       return send(res, 200, { templates: Object.keys(policy.templates || {}) });
     }
-    if (url.pathname === '/api/tasks' && req.method === 'GET') return send(res, 200, { version: 1, tasks: listTasks() });
-    if (url.pathname === '/api/agents' && req.method === 'GET') return send(res, 200, readJson(paths.agents));
-    if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, { version: 1, events: listEvents(300) });
+    if (url.pathname === '/api/tasks' && req.method === 'GET') return send(res, 200, { version: 1, tasks: await listTasks() });
+    if (url.pathname === '/api/agents' && req.method === 'GET') {
+      const payload = readJson(paths.agents);
+      const agents = Array.isArray(payload.agents) ? payload.agents : [];
+      if (!agents.some((a) => a.id === 'ops')) {
+        agents.push({
+          id: 'ops',
+          sessionKey: 'agent:main:subagent:ops',
+          role: 'operations',
+          capabilities: ['ops', 'triage', 'governance', 'watchdog'],
+          canExternalMessage: false,
+          canDestructive: false
+        });
+      }
+      return send(res, 200, { ...payload, agents });
+    }
+    if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, { version: 1, events: await listEvents(300) });
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/inbox') && req.method === 'GET') {
       const agentId = url.pathname.split('/')[3];
-      markInboxSeen(agentId);
-      return send(res, 200, { agentId, tasks: agentInbox(agentId) });
+      await markInboxSeen(agentId);
+      return send(res, 200, { agentId, tasks: await agentInbox(agentId) });
     }
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/wake') && req.method === 'POST') {
       const agentId = url.pathname.split('/')[3];
-      markInboxSeen(agentId);
-      const task = claimNext(agentId);
+      await markInboxSeen(agentId);
+      const task = await claimNext(agentId);
       const summary = task ? `claimed ${task.id}` : 'no_actionable_tasks';
-      recordHeartbeat(agentId, 'ok', summary);
-      if (task) addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
-      return send(res, 200, { ok: true, agentId, task, inboxCount: agentInbox(agentId).length });
+      await recordHeartbeat(agentId, 'ok', summary);
+      if (task) await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
+      return send(res, 200, { ok: true, agentId, task, inboxCount: (await agentInbox(agentId)).length });
     }
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/claim-next') && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const agentId = url.pathname.split('/')[3];
-      const task = claimNext(agentId);
+      const task = await claimNext(agentId);
       if (!task) return send(res, 200, { ok: true, task: null });
-      addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
+      await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
       return send(res, 200, { ok: true, task });
     }
 
     if (url.pathname === '/api/heartbeat/run' && req.method === 'POST') {
       const body = await parseBody(req);
       if (!body.agentId) return send(res, 400, { error: 'validation_failed', details: ['agentId is required'] });
-      recordHeartbeat(body.agentId, body.status || 'ok', body.summary || '');
+      await recordHeartbeat(body.agentId, body.status || 'ok', body.summary || '');
       return send(res, 200, { ok: true });
     }
 
@@ -152,8 +166,8 @@ export const server = http.createServer(async (req, res) => {
       if (!body.taskId || !Array.isArray(body.agentIds) || body.agentIds.length === 0) {
         return send(res, 400, { error: 'validation_failed', details: ['taskId and non-empty agentIds[] required'] });
       }
-      for (const id of body.agentIds) assignTask(body.taskId, id);
-      addEvent({ type: 'task_assigned', message: `${body.taskId} assigned to ${body.agentIds.join(', ')}`, taskId: body.taskId, actor: body.actor || 'ui' });
+      for (const id of body.agentIds) await assignTask(body.taskId, id);
+      await addEvent({ type: 'task_assigned', message: `${body.taskId} assigned to ${body.agentIds.join(', ')}`, taskId: body.taskId, actor: body.actor || 'ui' });
       return send(res, 200, { ok: true, taskId: body.taskId, assigned: body.agentIds.length });
     }
 
@@ -163,18 +177,18 @@ export const server = http.createServer(async (req, res) => {
       if (!body.taskId || !body.template) {
         return send(res, 400, { error: 'validation_failed', details: ['taskId and template required'] });
       }
-      const task = listTasks().find((t) => t.id === body.taskId);
+      const task = (await listTasks()).find((t) => t.id === body.taskId);
       if (!task) return send(res, 404, { error: 'task not found' });
 
       const plan = buildOrchestrationPlan({ taskId: task.id, template: body.template, title: task.title });
 
       for (const w of plan.workers) {
         const targetAgent = w.role.startsWith('codi') ? 'codi' : w.role.startsWith('scout') ? 'scout' : 'ultron';
-        assignTask(task.id, targetAgent);
+        await assignTask(task.id, targetAgent);
       }
 
-      addNote(task.id, `[ORCHESTRA:${plan.template}] workers=${plan.workers.map((w) => w.role).join(', ')} evidence=${plan.evidence.join(', ')}`, body.actor || 'ui.orchestrator');
-      addEvent({ type: 'orchestra_started', message: `${task.id} started ${plan.template} with ${plan.workers.length} workers`, taskId: task.id, actor: body.actor || 'ui.orchestrator' });
+      await addNote(task.id, `[ORCHESTRA:${plan.template}] workers=${plan.workers.map((w) => w.role).join(', ')} evidence=${plan.evidence.join(', ')}`, body.actor || 'ui.orchestrator');
+      await addEvent({ type: 'orchestra_started', message: `${task.id} started ${plan.template} with ${plan.workers.length} workers`, taskId: task.id, actor: body.actor || 'ui.orchestrator' });
 
       return send(res, 200, { ok: true, plan });
     }
@@ -183,8 +197,8 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, {
         version: 1,
         exportedAt: now(),
-        tasks: listTasks(),
-        activity: listEvents(1000),
+        tasks: await listTasks(),
+        activity: await listEvents(1000),
         agents: readJson(paths.agents).agents || []
       });
     }
@@ -204,8 +218,8 @@ export const server = http.createServer(async (req, res) => {
         createdAt: now(),
         updatedAt: now()
       };
-      createTask(task);
-      logEvent('task_created', `${task.owner} created ${task.id}: ${task.title}`, task.id, task.owner);
+      await createTask(task);
+      await logEvent('task_created', `${task.owner} created ${task.id}: ${task.title}`, task.id, task.owner);
       return send(res, 200, { ok: true, task });
     }
 
@@ -215,7 +229,7 @@ export const server = http.createServer(async (req, res) => {
       const validation = validateTaskUpdate(patch);
       if (!validation.ok) return send(res, 400, { error: 'validation_failed', details: validation.errors });
 
-      const t = updateTask({
+      const t = await updateTask({
         id: patch.id,
         status: patch.status,
         owner: patch.owner,
@@ -223,7 +237,7 @@ export const server = http.createServer(async (req, res) => {
       });
       if (!t) return send(res, 404, { error: 'task not found' });
 
-      logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`, t.id, patch.actor || 'ui');
+      await logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`, t.id, patch.actor || 'ui');
       return send(res, 200, { ok: true, task: {
         id: t.id, title: t.title, status: t.status, priority: t.priority, owner: t.owner, updatedAt: t.updated_at
       }});
@@ -232,10 +246,10 @@ export const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/task/note' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
-      const existing = listTasks().find((x) => x.id === body.id);
+      const existing = (await listTasks()).find((x) => x.id === body.id);
       if (!existing) return send(res, 404, { error: 'task not found' });
-      addNote(body.id, body.note || '', body.actor || 'ui');
-      logEvent('task_note', `${body.id}: ${body.note || ''}`, body.id, body.actor || 'ui');
+      await addNote(body.id, body.note || '', body.actor || 'ui');
+      await logEvent('task_note', `${body.id}: ${body.note || ''}`, body.id, body.actor || 'ui');
       return send(res, 200, { ok: true });
     }
 
@@ -243,9 +257,9 @@ export const server = http.createServer(async (req, res) => {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
       if (!body.id) return send(res, 400, { error: 'validation_failed', details: ['id is required'] });
-      const removed = deleteTask(body.id);
+      const removed = await deleteTask(body.id);
       if (!removed) return send(res, 404, { error: 'task not found' });
-      logEvent('task_deleted', `${removed.id}: ${removed.title}`, removed.id, body.actor || 'ui');
+      await logEvent('task_deleted', `${removed.id}: ${removed.title}`, removed.id, body.actor || 'ui');
       return send(res, 200, { ok: true, deletedId: removed.id });
     }
 
@@ -259,9 +273,9 @@ export const server = http.createServer(async (req, res) => {
         return send(res, 400, { error: 'validation_failed', details: ['tasks and activity arrays are required'] });
       }
 
-      db.exec('DELETE FROM task_assignments; DELETE FROM task_notes; DELETE FROM tasks; DELETE FROM task_events;');
+      await clearAllData();
       for (const t of body.tasks) {
-        createTask({
+        await createTask({
           id: t.id,
           title: t.title,
           status: t.status,
@@ -270,19 +284,19 @@ export const server = http.createServer(async (req, res) => {
           createdAt: t.createdAt || now(),
           updatedAt: t.updatedAt || now()
         });
-        for (const n of (t.notes || [])) addNote(t.id, n.note || '', 'import');
+        for (const n of (t.notes || [])) await addNote(t.id, n.note || '', 'import');
       }
-      for (const e of body.activity) addEvent({ taskId: e.taskId || null, type: e.type || 'event', message: e.message || '', actor: e.actor || 'import' });
+      for (const e of body.activity) await addEvent({ taskId: e.taskId || null, type: e.type || 'event', message: e.message || '', actor: e.actor || 'import' });
 
-      logEvent('import', `Imported snapshot with ${body.tasks.length} tasks and ${body.activity.length} events`, null, body.actor || 'ui');
+      await logEvent('import', `Imported snapshot with ${body.tasks.length} tasks and ${body.activity.length} events`, null, body.actor || 'ui');
       return send(res, 200, { ok: true, tasks: body.tasks.length, activity: body.activity.length });
     }
 
     if (url.pathname === '/api/standup' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
-      const text = getStandup(listTasks());
+      const text = getStandup(await listTasks());
       writeFileSync(paths.standup, text + '\n');
-      logEvent('standup', 'Generated standup report');
+      await logEvent('standup', 'Generated standup report');
       return send(res, 200, { ok: true, standup: text });
     }
 
@@ -295,6 +309,8 @@ export const server = http.createServer(async (req, res) => {
     return send(res, 500, { error: String(e.message || e) });
   }
 });
+
+export default server;
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   server.listen(PORT, HOST, () => {
