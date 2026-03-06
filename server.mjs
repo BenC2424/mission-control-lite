@@ -188,6 +188,12 @@ export const server = http.createServer(async (req, res) => {
         if (status === 'degraded') return 'warn';
         return 'critical';
       };
+      const recommendedAction = (status) => {
+        if (status === 'healthy') return 'none';
+        if (status === 'degraded') return 'observe';
+        if (status === 'unhealthy') return 'investigate';
+        return 'restart_candidate';
+      };
 
       const agents = allAgentIds.map((agentId) => {
         const hb = latestByAgent.get(agentId) || null;
@@ -198,7 +204,8 @@ export const server = http.createServer(async (req, res) => {
           last_heartbeat_at: hb?.at || null,
           heartbeat_age_seconds: ageSeconds,
           status,
-          warning_level: warningLevel(status)
+          warning_level: warningLevel(status),
+          recommended_action: recommendedAction(status)
         };
       });
 
@@ -210,6 +217,7 @@ export const server = http.createServer(async (req, res) => {
 
         if (a.warning_level === 'warn') acc.warning_agents.push(a.agent_id);
         if (a.warning_level === 'critical') acc.critical_agents.push(a.agent_id);
+        if (a.recommended_action === 'restart_candidate') acc.restart_candidate_agents.push(a.agent_id);
         return acc;
       }, {
         healthy_count: 0,
@@ -217,7 +225,8 @@ export const server = http.createServer(async (req, res) => {
         unhealthy_count: 0,
         stale_count: 0,
         warning_agents: [],
-        critical_agents: []
+        critical_agents: [],
+        restart_candidate_agents: []
       });
 
       return send(res, 200, {
@@ -226,6 +235,7 @@ export const server = http.createServer(async (req, res) => {
         total_agents: agents.length,
         has_warnings: counts.warning_agents.length > 0,
         has_critical: counts.critical_agents.length > 0,
+        has_restart_candidates: counts.restart_candidate_agents.length > 0,
         ...counts,
         agents
       });
