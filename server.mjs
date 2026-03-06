@@ -163,6 +163,55 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true });
     }
 
+    if (url.pathname === '/api/heartbeat/report' && req.method === 'GET') {
+      const metrics = await getMetrics();
+      const latest = metrics.latestHeartbeats || [];
+      const latestByAgent = new Map();
+      for (const hb of latest) {
+        if (!latestByAgent.has(hb.agentId)) latestByAgent.set(hb.agentId, hb);
+      }
+
+      const configuredAgents = (existsSync(paths.agents) ? (readJson(paths.agents).agents || []) : []).map((a) => a.id).filter(Boolean);
+      const baselineAgents = ['ops', 'codi', 'scout', 'ultron'];
+      const allAgentIds = [...new Set([...baselineAgents, ...configuredAgents, ...latestByAgent.keys()])];
+
+      const nowMs = Date.now();
+      const classify = (ageSeconds) => {
+        if (ageSeconds <= 300) return 'healthy';
+        if (ageSeconds <= 900) return 'degraded';
+        if (ageSeconds <= 1800) return 'unhealthy';
+        return 'stale';
+      };
+
+      const agents = allAgentIds.map((agentId) => {
+        const hb = latestByAgent.get(agentId) || null;
+        const ageSeconds = hb ? Math.max(0, Math.floor((nowMs - new Date(hb.at).getTime()) / 1000)) : null;
+        const status = hb ? classify(ageSeconds) : 'stale';
+        return {
+          agent_id: agentId,
+          last_heartbeat_at: hb?.at || null,
+          heartbeat_age_seconds: ageSeconds,
+          status
+        };
+      });
+
+      const counts = agents.reduce((acc, a) => {
+        if (a.status === 'healthy') acc.healthy_count += 1;
+        else if (a.status === 'degraded') acc.degraded_count += 1;
+        else if (a.status === 'unhealthy') acc.unhealthy_count += 1;
+        else acc.stale_count += 1;
+        return acc;
+      }, { healthy_count: 0, degraded_count: 0, unhealthy_count: 0, stale_count: 0 });
+
+      return send(res, 200, {
+        ok: true,
+        generated_at: now(),
+        total_agents: agents.length,
+        ...counts,
+        agents
+      });
+    }
+
     if (url.pathname === '/api/task/assign' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
