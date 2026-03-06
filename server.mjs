@@ -23,7 +23,9 @@ import {
   getEscalations,
   clearAllData,
   getTaskById,
-  createStandupRecord
+  createStandupRecord,
+  countTasksByStatus,
+  countTasksByOwnerAndStatus
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -230,13 +232,40 @@ export const server = http.createServer(async (req, res) => {
       const validation = validateTaskUpdate(patch);
       if (!validation.ok) return send(res, 400, { error: 'validation_failed', details: validation.errors });
 
+      const existing = await getTaskById(patch.id);
+      if (!existing) return send(res, 404, { error: 'task not found' });
+
+      const targetStatus = patch.status || existing.status;
+      const targetOwner = patch.owner || existing.owner;
+
+      // Hard WIP guardrails (control-plane policy)
+      if (targetStatus === 'in_progress' && existing.status !== 'in_progress') {
+        const globalInProgress = await countTasksByStatus('in_progress', patch.id);
+        if (globalInProgress >= 4) {
+          await logEvent('task_transition_denied', `${patch.id} denied -> in_progress (global_wip_cap reached: ${globalInProgress}/4)`, patch.id, patch.actor || 'ui');
+          return send(res, 409, { error: 'wip_limit_exceeded', scope: 'global_in_progress', limit: 4, current: globalInProgress });
+        }
+        const ownerInProgress = await countTasksByOwnerAndStatus(targetOwner, 'in_progress', patch.id);
+        if (ownerInProgress >= 1) {
+          await logEvent('task_transition_denied', `${patch.id} denied -> in_progress for ${targetOwner} (agent_wip_cap reached: ${ownerInProgress}/1)`, patch.id, patch.actor || 'ui');
+          return send(res, 409, { error: 'wip_limit_exceeded', scope: 'owner_in_progress', owner: targetOwner, limit: 1, current: ownerInProgress });
+        }
+      }
+
+      if (targetStatus === 'review' && existing.status !== 'review') {
+        const reviewCount = await countTasksByStatus('review', patch.id);
+        if (reviewCount >= 3) {
+          await logEvent('task_transition_denied', `${patch.id} denied -> review (review_cap reached: ${reviewCount}/3)`, patch.id, patch.actor || 'ui');
+          return send(res, 409, { error: 'wip_limit_exceeded', scope: 'global_review', limit: 3, current: reviewCount });
+        }
+      }
+
       const t = await updateTask({
         id: patch.id,
         status: patch.status,
         owner: patch.owner,
         priority: patch.priority && VALID_PRIORITY.includes(patch.priority) ? patch.priority : undefined
       });
-      if (!t) return send(res, 404, { error: 'task not found' });
 
       await logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`, t.id, patch.actor || 'ui');
       return send(res, 200, { ok: true, task: {
