@@ -21,14 +21,15 @@ import {
   recordHeartbeat,
   getMetrics,
   getEscalations,
-  clearAllData
+  clearAllData,
+  getTaskById
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
 const __dirname = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const HOST = '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
-const READ_ONLY = process.env.READ_ONLY === '1';
+const READ_ONLY = ['1','true','yes','on'].includes(String(process.env.READ_ONLY || '').trim().toLowerCase());
 
 const paths = {
   tasks: join(__dirname, 'runtime', 'tasks.json'),
@@ -214,7 +215,7 @@ export const server = http.createServer(async (req, res) => {
         title: body.title.trim(),
         status: body.status || 'inbox',
         priority: body.priority || 'p2',
-        owner: body.owner || 'ultron',
+        owner: body.owner || 'unassigned',
         createdAt: now(),
         updatedAt: now()
       };
@@ -246,7 +247,7 @@ export const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/task/note' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
-      const existing = (await listTasks()).find((x) => x.id === body.id);
+      const existing = await getTaskById(body.id);
       if (!existing) return send(res, 404, { error: 'task not found' });
       await addNote(body.id, body.note || '', body.actor || 'ui');
       await logEvent('task_note', `${body.id}: ${body.note || ''}`, body.id, body.actor || 'ui');
