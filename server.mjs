@@ -27,7 +27,9 @@ import {
   countTasksByStatus,
   countTasksByOwnerAndStatus,
   createHeartbeatRestartAttempt,
-  listHeartbeatRestartAttempts
+  listHeartbeatRestartAttempts,
+  createTaskRecoveryAction,
+  hasTaskRecoveryAction
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -314,6 +316,80 @@ export const server = http.createServer(async (req, res) => {
       }
 
       return send(res, 200, { ok: true, attempted: results.length, results });
+    }
+
+    if (url.pathname === '/api/task/recovery-run' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const body = await parseBody(req);
+      const onlyAgent = body.agentId || null;
+
+      const metrics = await getMetrics();
+      const latest = metrics.latestHeartbeats || [];
+      const latestByAgent = new Map();
+      for (const hb of latest) if (!latestByAgent.has(hb.agentId)) latestByAgent.set(hb.agentId, hb);
+      const configuredAgents = (existsSync(paths.agents) ? (readJson(paths.agents).agents || []) : []).map((a) => a.id).filter(Boolean);
+      const baselineAgents = ['ops', 'codi', 'scout', 'ultron'];
+      const allAgentIds = [...new Set([...baselineAgents, ...configuredAgents, ...latestByAgent.keys()])];
+
+      const nowMs = Date.now();
+      const classify = (ageSeconds) => {
+        if (ageSeconds <= 300) return 'healthy';
+        if (ageSeconds <= 900) return 'degraded';
+        if (ageSeconds <= 1800) return 'unhealthy';
+        return 'stale';
+      };
+
+      const tasks = await listTasks();
+      const recovered = [];
+      const skipped = [];
+
+      for (const agentId of allAgentIds) {
+        if (onlyAgent && onlyAgent !== agentId) continue;
+        const hb = latestByAgent.get(agentId) || null;
+        const ageSeconds = hb ? Math.max(0, Math.floor((nowMs - new Date(hb.at).getTime()) / 1000)) : null;
+        const status = hb ? classify(ageSeconds) : 'stale';
+        if (!(status === 'unhealthy' || status === 'stale')) continue;
+
+        const sixHoursAgo = new Date(nowMs - 6 * 60 * 60 * 1000).toISOString();
+        const attempts = await listHeartbeatRestartAttempts(agentId, sixHoursAgo);
+        if (attempts.length < 2) {
+          skipped.push({ agent_id: agentId, reason: 'restart_attempts_not_exhausted', attempts: attempts.length });
+          continue;
+        }
+
+        const inProgressTasks = tasks.filter((t) => t.owner === agentId && t.status === 'in_progress');
+        for (const t of inProgressTasks) {
+          const bucket = Math.floor(nowMs / (30 * 60 * 1000));
+          const idempotencyKey = `task_recovery:${agentId}:${bucket}:${t.id}`;
+          if (await hasTaskRecoveryAction(idempotencyKey)) {
+            skipped.push({ task_id: t.id, agent_id: agentId, reason: 'already_recovered_in_bucket' });
+            continue;
+          }
+
+          const freshTasks = await listTasks();
+          const current = freshTasks.find((x) => x.id === t.id);
+          if (!current || current.status !== 'in_progress') {
+            skipped.push({ task_id: t.id, agent_id: agentId, reason: 'task_no_longer_in_progress' });
+            continue;
+          }
+
+          const t2hb = latestByAgent.get(agentId) || null;
+          const t2age = t2hb ? Math.max(0, Math.floor((Date.now() - new Date(t2hb.at).getTime()) / 1000)) : null;
+          const t2status = t2hb ? classify(t2age) : 'stale';
+          if (!(t2status === 'unhealthy' || t2status === 'stale')) {
+            skipped.push({ task_id: t.id, agent_id: agentId, reason: 'agent_recovered_before_task_recovery' });
+            continue;
+          }
+
+          await updateTask({ id: t.id, status: 'assigned', owner: agentId });
+          await addNote(t.id, 'Recovered due to agent health failure after restart attempts exhausted.', 'autopilot');
+          await addEvent({ taskId: t.id, type: 'task_recovered', message: 'agent_unhealthy', actor: 'autopilot' });
+          await createTaskRecoveryAction({ taskId: t.id, agentId, result: 'recovered', idempotencyKey });
+          recovered.push({ task_id: t.id, agent_id: agentId, from: 'in_progress', to: 'assigned', idempotency_key: idempotencyKey });
+        }
+      }
+
+      return send(res, 200, { ok: true, recovered_count: recovered.length, recovered, skipped_count: skipped.length, skipped });
     }
 
     if (url.pathname === '/api/task/assign' && req.method === 'POST') {
