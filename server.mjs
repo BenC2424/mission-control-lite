@@ -22,7 +22,8 @@ import {
   getMetrics,
   getEscalations,
   clearAllData,
-  getTaskById
+  getTaskById,
+  createStandupRecord
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -34,7 +35,6 @@ const READ_ONLY = ['1','true','yes','on'].includes(String(process.env.READ_ONLY 
 const paths = {
   tasks: join(__dirname, 'runtime', 'tasks.json'),
   agents: join(__dirname, 'config', 'agents.json'),
-  standup: join(__dirname, 'runtime', 'standup-latest.md'),
   activity: join(__dirname, 'runtime', 'activity.json')
 };
 
@@ -295,10 +295,24 @@ export const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/standup' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
-      const text = getStandup(await listTasks());
-      writeFileSync(paths.standup, text + '\n');
-      await logEvent('standup', 'Generated standup report');
-      return send(res, 200, { ok: true, standup: text });
+      const tasks = await listTasks();
+      const text = getStandup(tasks);
+      const snapshot = {
+        counts: tasks.reduce((acc, t) => {
+          acc[t.status] = (acc[t.status] || 0) + 1;
+          return acc;
+        }, {}),
+        total: tasks.length
+      };
+      const runId = `standup-${Date.now()}`;
+      const rec = await createStandupRecord({
+        tenantId: process.env.MCL_TENANT_ID || 'default',
+        content: text,
+        snapshot,
+        runId
+      });
+      await logEvent('standup', `Generated standup report ${rec.id}`);
+      return send(res, 200, { ok: true, standupId: rec.id, generatedAt: rec.generatedAt, standup: text, snapshot });
     }
 
     let filePath = url.pathname === '/' ? '/ui/index.html' : url.pathname;
