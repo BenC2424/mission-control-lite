@@ -318,6 +318,89 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, attempted: results.length, results });
     }
 
+    if (url.pathname === '/api/autopilot/stale-run' && req.method === 'POST') {
+      const tasks = await listTasks();
+      const nowMs = Date.now();
+      const toMs = (v) => {
+        const d = new Date(v || 0).getTime();
+        return Number.isFinite(d) ? d : 0;
+      };
+      const lastActivityMs = (t) => toMs(t.lastActivityAt || t.updatedAt || t.createdAt);
+
+      const assignedStale = tasks.filter((t) => t.status === 'assigned' && (nowMs - lastActivityMs(t)) > 24 * 60 * 60 * 1000);
+      const inProgressStale = tasks.filter((t) => t.status === 'in_progress' && (nowMs - lastActivityMs(t)) > 8 * 60 * 60 * 1000);
+      const reviewStale = tasks.filter((t) => t.status === 'review' && (nowMs - lastActivityMs(t)) > 12 * 60 * 60 * 1000);
+
+      const runId = `stale-run-${Date.now()}`;
+      const staleTaskIds = {
+        assigned: assignedStale.map((t) => t.id),
+        in_progress: inProgressStale.map((t) => t.id),
+        review: reviewStale.map((t) => t.id)
+      };
+
+      const recommendedActions = {
+        assigned: 'queue_for_ops_triage',
+        in_progress: 'queue_for_recovery_check',
+        review: 'return_to_assigned_for_completion_check'
+      };
+
+      const result = {
+        ok: true,
+        run_id: runId,
+        generated_at: now(),
+        assigned_stale_count: assignedStale.length,
+        in_progress_stale_count: inProgressStale.length,
+        review_stale_count: reviewStale.length,
+        stale_task_ids: staleTaskIds,
+        recommended_actions: recommendedActions,
+        recovery_candidates: [...new Set(inProgressStale.map((t) => t.owner))]
+      };
+
+      if (!READ_ONLY) {
+        await addEvent({ type: 'autopilot_stale_run', message: `${runId} assigned=${assignedStale.length} in_progress=${inProgressStale.length} review=${reviewStale.length}`, actor: 'autopilot' });
+      }
+
+      return send(res, 200, result);
+    }
+
+    if (url.pathname === '/api/autopilot/board-health' && req.method === 'GET') {
+      const tasks = await listTasks();
+      const nowMs = Date.now();
+      const toMs = (v) => {
+        const d = new Date(v || 0).getTime();
+        return Number.isFinite(d) ? d : 0;
+      };
+      const lastActivityMs = (t) => toMs(t.lastActivityAt || t.updatedAt || t.createdAt);
+
+      const byStatus = tasks.reduce((acc, t) => { acc[t.status] = (acc[t.status] || 0) + 1; return acc; }, {});
+      const byOwner = tasks.reduce((acc, t) => { acc[t.owner] = (acc[t.owner] || 0) + 1; return acc; }, {});
+
+      const assignedStale = tasks.filter((t) => t.status === 'assigned' && (nowMs - lastActivityMs(t)) > 24 * 60 * 60 * 1000).length;
+      const inProgressStale = tasks.filter((t) => t.status === 'in_progress' && (nowMs - lastActivityMs(t)) > 8 * 60 * 60 * 1000).length;
+      const reviewStale = tasks.filter((t) => t.status === 'review' && (nowMs - lastActivityMs(t)) > 12 * 60 * 60 * 1000).length;
+
+      const inProgressTotal = byStatus.in_progress || 0;
+      const reviewTotal = byStatus.review || 0;
+
+      return send(res, 200, {
+        ok: true,
+        generated_at: now(),
+        open_total: tasks.filter((t) => t.status !== 'done' && t.status !== 'archived').length,
+        in_progress_total: inProgressTotal,
+        review_total: reviewTotal,
+        blocked_total: byStatus.blocked || 0,
+        by_status: byStatus,
+        by_owner: byOwner,
+        stale_bins: {
+          assigned_gt_24h: assignedStale,
+          in_progress_gt_8h: inProgressStale,
+          review_gt_12h: reviewStale
+        },
+        review_pressure: reviewTotal > 3 ? 'high' : reviewTotal > 1 ? 'medium' : 'low',
+        wip_pressure: inProgressTotal > 4 ? 'high' : inProgressTotal > 2 ? 'medium' : 'low'
+      });
+    }
+
     if (url.pathname === '/api/task/recovery-run' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
