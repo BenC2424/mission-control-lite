@@ -103,6 +103,18 @@ function getStandup(tasks) {
   ].join('\n');
 }
 
+const DEFAULT_TENANT_ID = process.env.MCL_TENANT_ID || 'internal';
+function resolveTenantContext(req, url) {
+  const headerTenant = req.headers['x-tenant-id'];
+  const queryTenant = url.searchParams.get('tenant_id');
+  const tenantId = String(headerTenant || queryTenant || DEFAULT_TENANT_ID).trim();
+
+  if (!tenantId) return { ok: false, error: 'tenant_required' };
+  // Foundation phase: internal tenant only (explicit enforcement before RLS).
+  if (tenantId !== DEFAULT_TENANT_ID) return { ok: false, error: 'invalid_tenant', tenantId };
+  return { ok: true, tenantId };
+}
+
 export const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (req.method === 'OPTIONS') return send(res, 200, '');
@@ -112,6 +124,13 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, service: 'mission-control-lite', time: now() });
     }
     if (url.pathname === '/api/config' && req.method === 'GET') return send(res, 200, { readOnly: READ_ONLY });
+
+    const tenantScoped = url.pathname.startsWith('/api/');
+    if (tenantScoped) {
+      const tenantCtx = resolveTenantContext(req, url);
+      if (!tenantCtx.ok) return send(res, 400, { error: tenantCtx.error });
+    }
+
     if (url.pathname === '/api/metrics' && req.method === 'GET') return send(res, 200, await getMetrics());
     if (url.pathname === '/api/escalations' && req.method === 'GET') return send(res, 200, { items: await getEscalations(100) });
     if (url.pathname === '/api/orchestration/templates' && req.method === 'GET') {
