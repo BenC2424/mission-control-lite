@@ -29,7 +29,8 @@ import {
   createHeartbeatRestartAttempt,
   listHeartbeatRestartAttempts,
   createTaskRecoveryAction,
-  hasTaskRecoveryAction
+  hasTaskRecoveryAction,
+  createWeeklyReportRecord
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -638,12 +639,23 @@ export const server = http.createServer(async (req, res) => {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const tasks = await listTasks();
       const text = getStandup(tasks);
+      const nowMs = Date.now();
+      const toMs = (v) => {
+        const d = new Date(v || 0).getTime();
+        return Number.isFinite(d) ? d : 0;
+      };
+      const lastActivityMs = (t) => toMs(t.lastActivityAt || t.updatedAt || t.createdAt);
       const snapshot = {
         counts: tasks.reduce((acc, t) => {
           acc[t.status] = (acc[t.status] || 0) + 1;
           return acc;
         }, {}),
-        total: tasks.length
+        total: tasks.length,
+        stale_bins: {
+          assigned_gt_24h: tasks.filter((t) => t.status === 'assigned' && (nowMs - lastActivityMs(t)) > 24 * 60 * 60 * 1000).length,
+          in_progress_gt_8h: tasks.filter((t) => t.status === 'in_progress' && (nowMs - lastActivityMs(t)) > 8 * 60 * 60 * 1000).length,
+          review_gt_12h: tasks.filter((t) => t.status === 'review' && (nowMs - lastActivityMs(t)) > 12 * 60 * 60 * 1000).length
+        }
       };
       const runId = `standup-${Date.now()}`;
       const rec = await createStandupRecord({
@@ -654,6 +666,67 @@ export const server = http.createServer(async (req, res) => {
       });
       await logEvent('standup', `Generated standup report ${rec.id}`);
       return send(res, 200, { ok: true, standupId: rec.id, generatedAt: rec.generatedAt, standup: text, snapshot });
+    }
+
+    if (url.pathname === '/api/report/weekly' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const events = await listEvents(5000);
+      const nowDate = new Date();
+      const day = nowDate.getUTCDay();
+      const mondayOffset = (day + 6) % 7;
+      const weekStartDate = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() - mondayOffset, 0, 0, 0));
+      const weekStart = weekStartDate.toISOString();
+
+      const inWindow = events.filter((e) => new Date(e.at).getTime() >= weekStartDate.getTime());
+      const countType = (type) => inWindow.filter((e) => e.type === type).length;
+
+      const metrics = {
+        tasks_created: countType('task_created'),
+        tasks_completed: countType('task_updated_done') + inWindow.filter((e) => e.type === 'task_updated' && String(e.message || '').includes('-> done')).length,
+        tasks_reopened: inWindow.filter((e) => e.type === 'task_updated' && String(e.message || '').includes('done') && !String(e.message || '').includes('-> done')).length,
+        tasks_blocked: inWindow.filter((e) => e.type === 'task_updated' && String(e.message || '').includes('-> blocked')).length,
+        recovery_events: countType('task_recovered'),
+        restart_events: inWindow.filter((e) => e.type === 'heartbeat' && String(e.message || '').includes('restart')).length
+      };
+
+      const byActor = inWindow.reduce((acc, e) => {
+        const k = e.actor || 'unknown';
+        acc[k] = (acc[k] || 0) + 1;
+        return acc;
+      }, {});
+
+      const snapshot = {
+        week_start: weekStart,
+        event_count: inWindow.length,
+        metrics,
+        agent_utilization: byActor,
+        cycle_time: null,
+        lead_time: null
+      };
+
+      const content = [
+        `# WEEKLY THROUGHPUT REPORT — ${weekStart.slice(0, 10)}`,
+        '',
+        `- Tasks created: ${metrics.tasks_created}`,
+        `- Tasks completed: ${metrics.tasks_completed}`,
+        `- Tasks reopened: ${metrics.tasks_reopened}`,
+        `- Tasks blocked: ${metrics.tasks_blocked}`,
+        `- Recovery events: ${metrics.recovery_events}`,
+        `- Restart events: ${metrics.restart_events}`,
+        '',
+        '## Agent Utilization (event counts)',
+        ...Object.entries(byActor).map(([actor, n]) => `- ${actor}: ${n}`)
+      ].join('\n');
+
+      const rec = await createWeeklyReportRecord({
+        tenantId: process.env.MCL_TENANT_ID || 'default',
+        weekStart,
+        content,
+        snapshot
+      });
+
+      await logEvent('weekly_report_generated', `Generated weekly report ${rec.id}`, null, 'autopilot');
+      return send(res, 200, { ok: true, reportId: rec.id, generatedAt: rec.generatedAt, weekStart, snapshot, content });
     }
 
     let filePath = url.pathname === '/' ? '/ui/index.html' : url.pathname;
