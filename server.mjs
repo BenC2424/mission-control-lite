@@ -25,7 +25,9 @@ import {
   getTaskById,
   createStandupRecord,
   countTasksByStatus,
-  countTasksByOwnerAndStatus
+  countTasksByOwnerAndStatus,
+  createHeartbeatRestartAttempt,
+  listHeartbeatRestartAttempts
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -239,6 +241,79 @@ export const server = http.createServer(async (req, res) => {
         ...counts,
         agents
       });
+    }
+
+    if (url.pathname === '/api/heartbeat/restart-run' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const body = await parseBody(req);
+      const report = await (async () => {
+        const m = await getMetrics();
+        const latest = m.latestHeartbeats || [];
+        const latestByAgent = new Map();
+        for (const hb of latest) if (!latestByAgent.has(hb.agentId)) latestByAgent.set(hb.agentId, hb);
+        const configuredAgents = (existsSync(paths.agents) ? (readJson(paths.agents).agents || []) : []).map((a) => a.id).filter(Boolean);
+        const baselineAgents = ['ops', 'codi', 'scout', 'ultron'];
+        const allAgentIds = [...new Set([...baselineAgents, ...configuredAgents, ...latestByAgent.keys()])];
+        const nowMs = Date.now();
+        const classify = (ageSeconds) => {
+          if (ageSeconds <= 300) return 'healthy';
+          if (ageSeconds <= 900) return 'degraded';
+          if (ageSeconds <= 1800) return 'unhealthy';
+          return 'stale';
+        };
+        return allAgentIds.map((agentId) => {
+          const hb = latestByAgent.get(agentId) || null;
+          const ageSeconds = hb ? Math.max(0, Math.floor((nowMs - new Date(hb.at).getTime()) / 1000)) : null;
+          const status = hb ? classify(ageSeconds) : 'stale';
+          return { agentId, status, at: hb?.at || null };
+        });
+      })();
+
+      const onlyAgent = body.agentId || null;
+      const nowTs = Date.now();
+      const results = [];
+      for (const a of report) {
+        if (onlyAgent && a.agentId !== onlyAgent) continue;
+        const eligible = a.status === 'unhealthy' || a.status === 'stale';
+        if (!eligible) {
+          results.push({ agent_id: a.agentId, attempted_at: now(), reason: 'not_eligible', result: 'skipped', skip_reason: 'status_not_unhealthy_or_stale' });
+          continue;
+        }
+
+        const lastAttempts = await listHeartbeatRestartAttempts(a.agentId);
+        const lastAttempt = lastAttempts[0] || null;
+        const cooldownMs = 30 * 60 * 1000;
+        const sixHoursAgo = new Date(nowTs - 6 * 60 * 60 * 1000).toISOString();
+        const recentWindow = await listHeartbeatRestartAttempts(a.agentId, sixHoursAgo);
+        const attemptCountWindow = recentWindow.length;
+
+        if (lastAttempt && (nowTs - new Date(lastAttempt.attemptedAt).getTime()) < cooldownMs) {
+          const cooldownUntil = new Date(new Date(lastAttempt.attemptedAt).getTime() + cooldownMs).toISOString();
+          const idempotencyKey = `heartbeat_restart:${a.agentId}:${Math.floor(nowTs / cooldownMs)}`;
+          await createHeartbeatRestartAttempt({ agentId: a.agentId, attemptedAt: now(), reason: 'cooldown_active', result: 'skipped', skipReason: 'cooldown_active', cooldownUntil, attemptCountWindow, idempotencyKey });
+          results.push({ agent_id: a.agentId, attempted_at: now(), reason: 'cooldown_active', result: 'skipped', skip_reason: 'cooldown_active', cooldown_until: cooldownUntil, attempt_count_window: attemptCountWindow });
+          continue;
+        }
+
+        if (attemptCountWindow >= 2) {
+          const idempotencyKey = `heartbeat_restart:${a.agentId}:${Math.floor(nowTs / cooldownMs)}`;
+          await createHeartbeatRestartAttempt({ agentId: a.agentId, attemptedAt: now(), reason: 'max_attempts_window_reached', result: 'skipped', skipReason: 'max_attempts_window_reached', attemptCountWindow, idempotencyKey });
+          results.push({ agent_id: a.agentId, attempted_at: now(), reason: 'max_attempts_window_reached', result: 'skipped', skip_reason: 'max_attempts_window_reached', attempt_count_window: attemptCountWindow });
+          continue;
+        }
+
+        const idempotencyKey = `heartbeat_restart:${a.agentId}:${Math.floor(nowTs / cooldownMs)}`;
+        try {
+          await recordHeartbeat(a.agentId, 'ok', 'restart_automation_attempt');
+          await createHeartbeatRestartAttempt({ agentId: a.agentId, attemptedAt: now(), reason: 'restart_candidate', result: 'success', attemptCountWindow: attemptCountWindow + 1, idempotencyKey });
+          results.push({ agent_id: a.agentId, attempted_at: now(), reason: 'restart_candidate', result: 'success', attempt_count_window: attemptCountWindow + 1 });
+        } catch (e) {
+          await createHeartbeatRestartAttempt({ agentId: a.agentId, attemptedAt: now(), reason: 'restart_candidate', result: 'failed', skipReason: String(e.message || e), attemptCountWindow: attemptCountWindow + 1, idempotencyKey });
+          results.push({ agent_id: a.agentId, attempted_at: now(), reason: 'restart_candidate', result: 'failed', skip_reason: String(e.message || e), attempt_count_window: attemptCountWindow + 1 });
+        }
+      }
+
+      return send(res, 200, { ok: true, attempted: results.length, results });
     }
 
     if (url.pathname === '/api/task/assign' && req.method === 'POST') {
