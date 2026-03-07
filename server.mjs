@@ -30,7 +30,8 @@ import {
   listHeartbeatRestartAttempts,
   createTaskRecoveryAction,
   hasTaskRecoveryAction,
-  createWeeklyReportRecord
+  createWeeklyReportRecord,
+  listTenantAgents
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -195,9 +196,8 @@ export const server = http.createServer(async (req, res) => {
         if (!latestByAgent.has(hb.agentId)) latestByAgent.set(hb.agentId, hb);
       }
 
-      const configuredAgents = (existsSync(paths.agents) ? (readJson(paths.agents).agents || []) : []).map((a) => a.id).filter(Boolean);
-      const baselineAgents = ['ops', 'codi', 'scout', 'ultron'];
-      const allAgentIds = [...new Set([...baselineAgents, ...configuredAgents, ...latestByAgent.keys()])];
+      const tenantAgents = await listTenantAgents();
+      const allAgentIds = [...new Set([...tenantAgents.map((a) => a.agentId), ...latestByAgent.keys()])];
 
       const nowMs = Date.now();
       const classify = (ageSeconds) => {
@@ -273,9 +273,8 @@ export const server = http.createServer(async (req, res) => {
         const latest = m.latestHeartbeats || [];
         const latestByAgent = new Map();
         for (const hb of latest) if (!latestByAgent.has(hb.agentId)) latestByAgent.set(hb.agentId, hb);
-        const configuredAgents = (existsSync(paths.agents) ? (readJson(paths.agents).agents || []) : []).map((a) => a.id).filter(Boolean);
-        const baselineAgents = ['ops', 'codi', 'scout', 'ultron'];
-        const allAgentIds = [...new Set([...baselineAgents, ...configuredAgents, ...latestByAgent.keys()])];
+        const tenantAgents = await listTenantAgents();
+        const allAgentIds = [...new Set([...tenantAgents.map((a) => a.agentId), ...latestByAgent.keys()])];
         const nowMs = Date.now();
         const classify = (ageSeconds) => {
           if (ageSeconds <= 300) return 'healthy';
@@ -394,6 +393,15 @@ export const server = http.createServer(async (req, res) => {
 
       const byStatus = tasks.reduce((acc, t) => { acc[t.status] = (acc[t.status] || 0) + 1; return acc; }, {});
       const byOwner = tasks.reduce((acc, t) => { acc[t.owner] = (acc[t.owner] || 0) + 1; return acc; }, {});
+      const tenantTeam = await listTenantAgents();
+      const teamIds = new Set(tenantTeam.map((a) => a.agentId));
+      const teamWip = tasks.filter((t) => teamIds.has(t.owner)).reduce((acc, t) => {
+        if (!acc[t.owner]) acc[t.owner] = { in_progress: 0, assigned: 0, review: 0 };
+        if (t.status === 'in_progress') acc[t.owner].in_progress += 1;
+        if (t.status === 'assigned') acc[t.owner].assigned += 1;
+        if (t.status === 'review') acc[t.owner].review += 1;
+        return acc;
+      }, {});
 
       const assignedStale = tasks.filter((t) => t.status === 'assigned' && (nowMs - lastActivityMs(t)) > 24 * 60 * 60 * 1000).length;
       const inProgressStale = tasks.filter((t) => t.status === 'in_progress' && (nowMs - lastActivityMs(t)) > 8 * 60 * 60 * 1000).length;
@@ -411,6 +419,8 @@ export const server = http.createServer(async (req, res) => {
         blocked_total: byStatus.blocked || 0,
         by_status: byStatus,
         by_owner: byOwner,
+        tenant_team: tenantTeam.map((a) => ({ agent_id: a.agentId, role: a.role })),
+        team_wip: teamWip,
         stale_bins: {
           assigned_gt_24h: assignedStale,
           in_progress_gt_8h: inProgressStale,
@@ -430,9 +440,8 @@ export const server = http.createServer(async (req, res) => {
       const latest = metrics.latestHeartbeats || [];
       const latestByAgent = new Map();
       for (const hb of latest) if (!latestByAgent.has(hb.agentId)) latestByAgent.set(hb.agentId, hb);
-      const configuredAgents = (existsSync(paths.agents) ? (readJson(paths.agents).agents || []) : []).map((a) => a.id).filter(Boolean);
-      const baselineAgents = ['ops', 'codi', 'scout', 'ultron'];
-      const allAgentIds = [...new Set([...baselineAgents, ...configuredAgents, ...latestByAgent.keys()])];
+      const tenantAgents = await listTenantAgents();
+      const allAgentIds = [...new Set([...tenantAgents.map((a) => a.agentId), ...latestByAgent.keys()])];
 
       const nowMs = Date.now();
       const classify = (ageSeconds) => {
