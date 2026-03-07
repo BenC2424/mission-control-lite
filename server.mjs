@@ -672,17 +672,18 @@ export const server = http.createServer(async (req, res) => {
       for (let i = 0; i < maxMoves; i++) {
         const ordered = [...byWorker.entries()].sort((a, b) => (b[1].assigned - a[1].assigned));
         const donor = ordered[0];
-        const recipient = [...byWorker.entries()].sort((a, b) => (a[1].assigned - b[1].assigned))[0];
-        if (!donor || !recipient) break;
+        const idleRecipients = [...byWorker.entries()]
+          .filter(([, v]) => Number(v.in_progress || 0) < 1)
+          .sort((a, b) => (a[1].assigned - b[1].assigned));
+        const recipient = idleRecipients[0];
+        if (!donor) break;
+        if (!recipient) {
+          skipped.push({ reason: 'no_idle_recipient' });
+          break;
+        }
         if (donor[0] === recipient[0]) break;
         if ((donor[1].assigned - recipient[1].assigned) < 2) {
           skipped.push({ reason: 'already_balanced' });
-          break;
-        }
-
-        const recipientWip = Number(recipient[1].in_progress || 0);
-        if (recipientWip >= 1) {
-          skipped.push({ reason: 'recipient_at_wip_cap', recipient: recipient[0] });
           break;
         }
 
