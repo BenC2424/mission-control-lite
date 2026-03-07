@@ -34,6 +34,11 @@ import {
   listTenantAgents,
   addTenantAgent,
   getTeamTemplate,
+  listTeamTemplates,
+  upsertTenantTeam,
+  listTenantTeams,
+  countActiveTenantTeams,
+  setTenantAgentEnabled,
   createOnboardingRecord,
   getOnboardingRecord,
   updateOnboardingStatus,
@@ -119,7 +124,7 @@ function getStandup(tasks) {
 }
 
 const DEFAULT_TENANT_ID = process.env.MCL_TENANT_ID || 'internal';
-const VALID_ROLES = new Set(['tenant_user', 'tenant_ops', 'platform_admin']);
+const VALID_ROLES = new Set(['tenant_user', 'tenant_admin', 'tenant_ops', 'platform_admin']);
 
 function resolveAccessContext(req, url) {
   const requestedTenant = String(req.headers['x-tenant-id'] || url.searchParams.get('tenant_id') || '').trim();
@@ -557,6 +562,92 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, plans: plans.map((p) => ({ ...p, features: JSON.parse(p.featuresJson || '{}') })), tenantPlan: tenantPlan ? { ...tenantPlan, limits: JSON.parse(tenantPlan.limitsJson || '{}') } : null });
     }
 
+    if (url.pathname === '/api/teams/catalog' && req.method === 'GET') {
+      const tenantPlan = await getTenantPlan(accessCtx.tenantId);
+      const plan = tenantPlan ? await getServicePlan(tenantPlan.planKey) : await getServicePlan('professional');
+      const all = await listTeamTemplates();
+      const rank = { starter: 1, professional: 2, enterprise: 3 };
+      const current = rank[plan?.planKey || 'professional'] || 2;
+      const items = all
+        .filter((t) => !t.planKey || (rank[t.planKey] || 1) <= current)
+        .map((t) => {
+          const parsed = JSON.parse(t.templateJson || '{}');
+          const agents = Array.isArray(parsed.agents) ? parsed.agents : [];
+          return {
+            team_key: t.name,
+            description: `${t.name} template`,
+            agents_included: agents.map((a) => a.agentId),
+            min_plan: t.planKey || 'starter',
+            features: parsed.defaults || {},
+            default_wip: parsed.defaults?.wip_limit_in_progress || null,
+            max_agents: agents.length
+          };
+        });
+      return send(res, 200, { ok: true, tenantId: accessCtx.tenantId, planKey: plan?.planKey || 'professional', teams: items });
+    }
+
+    if (url.pathname === '/api/teams' && req.method === 'GET') {
+      const teams = await listTenantTeams(accessCtx.tenantId);
+      const agents = await listTenantAgents(accessCtx.tenantId);
+      return send(res, 200, { ok: true, tenantId: accessCtx.tenantId, teams, agents });
+    }
+
+    if (url.pathname === '/api/teams/activate' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, ['tenant_admin', 'tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
+      const body = await parseBody(req);
+      const teamKey = String(body.teamKey || '').trim();
+      if (!teamKey) return send(res, 400, { error: 'validation_failed', details: ['teamKey required'] });
+
+      const tpl = await getTeamTemplate(teamKey);
+      if (!tpl) return send(res, 404, { error: 'team_template_not_found' });
+
+      const tenantPlan = await getTenantPlan(accessCtx.tenantId);
+      const plan = tenantPlan ? await getServicePlan(tenantPlan.planKey) : await getServicePlan('professional');
+      const rank = { starter: 1, professional: 2, enterprise: 3 };
+      if (tpl.planKey && (rank[plan?.planKey || 'professional'] || 2) < (rank[tpl.planKey] || 1)) {
+        return send(res, 403, { error: 'team_not_allowed_for_plan', planKey: plan?.planKey, required: tpl.planKey });
+      }
+
+      const activeTeams = await countActiveTenantTeams(accessCtx.tenantId);
+      const maxTeams = Number(plan?.maxTeams || 1);
+      if (activeTeams >= maxTeams) return send(res, 409, { error: 'team_limit_exceeded', limit: maxTeams, current: activeTeams });
+
+      const parsed = JSON.parse(tpl.templateJson || '{}');
+      const desired = (Array.isArray(parsed.agents) ? parsed.agents : []);
+      const currentAgents = await listTenantAgents(accessCtx.tenantId);
+      const currentSet = new Set(currentAgents.map((a) => a.agentId));
+      const maxAgents = Number(plan?.maxAgents || 2);
+      const remainingSlots = Math.max(0, maxAgents - currentAgents.length);
+      const toSeed = desired.filter((a) => !currentSet.has(a.agentId)).slice(0, remainingSlots);
+      if (toSeed.length < desired.filter((a) => !currentSet.has(a.agentId)).length) return send(res, 409, { error: 'agent_limit_exceeded', limit: maxAgents, current: currentAgents.length });
+
+      for (const a of toSeed) await addTenantAgent({ tenantId: accessCtx.tenantId, agentId: a.agentId, role: a.role || 'agent', enabled: a.enabled ?? 1 });
+      for (const a of desired) await setTenantAgentEnabled({ tenantId: accessCtx.tenantId, agentId: a.agentId, enabled: 1 });
+      await upsertTenantTeam({ tenantId: accessCtx.tenantId, teamKey, status: 'active' });
+      return send(res, 200, { ok: true, teamKey, status: 'active', agentsAdded: toSeed.length });
+    }
+
+    if (url.pathname === '/api/teams/deactivate' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, ['tenant_admin', 'tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
+      const body = await parseBody(req);
+      const teamKey = String(body.teamKey || '').trim();
+      if (!teamKey) return send(res, 400, { error: 'validation_failed', details: ['teamKey required'] });
+      const tpl = await getTeamTemplate(teamKey);
+      if (!tpl) return send(res, 404, { error: 'team_template_not_found' });
+      const parsed = JSON.parse(tpl.templateJson || '{}');
+      const teamAgents = (Array.isArray(parsed.agents) ? parsed.agents : []).map((a) => a.agentId);
+
+      const tasks = await listTasks();
+      const activeTasks = tasks.filter((t) => teamAgents.includes(t.owner) && ['in_progress','assigned','review'].includes(t.status));
+      if (activeTasks.length > 0) return send(res, 409, { error: 'team_has_active_tasks', activeTaskCount: activeTasks.length });
+
+      for (const agentId of teamAgents) await setTenantAgentEnabled({ tenantId: accessCtx.tenantId, agentId, enabled: 0 });
+      await upsertTenantTeam({ tenantId: accessCtx.tenantId, teamKey, status: 'inactive' });
+      return send(res, 200, { ok: true, teamKey, status: 'inactive', agentsDisabled: teamAgents.length });
+    }
+
     if (url.pathname === '/api/tenant/signup' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
@@ -583,7 +674,7 @@ export const server = http.createServer(async (req, res) => {
       for (const a of seeded) await addTenantAgent({ tenantId, agentId: a.agentId, role: a.role || 'agent', enabled: a.enabled ?? 1 });
 
       const sub = await upsertSubscription({ tenantId, planKey, status: 'trial', billingProvider: 'manual', providerCustomerId: `cust_${tenantId}` });
-      await setTenantPlan({ tenantId, planKey, subscriptionId: sub?.id || null, status: 'trial', activatedAt: now(), limits: { max_agents: plan.maxAgents, max_wip: plan.maxWip, max_tasks: plan.maxTasks } });
+      await setTenantPlan({ tenantId, planKey, subscriptionId: sub?.id || null, status: 'trial', activatedAt: now(), limits: { max_teams: plan.maxTeams, max_agents: plan.maxAgents, max_wip: plan.maxWip, max_tasks: plan.maxTasks } });
       await updateOnboardingStatus({ id: rec.id, status: 'ready_for_validation' });
 
       const team = await listTenantAgents(tenantId);
@@ -655,7 +746,7 @@ export const server = http.createServer(async (req, res) => {
         subscriptionId: sub?.id || null,
         status: 'trial',
         activatedAt: now(),
-        limits: { max_agents: plan.maxAgents, max_wip: plan.maxWip, max_tasks: plan.maxTasks }
+        limits: { max_teams: plan.maxTeams, max_agents: plan.maxAgents, max_wip: plan.maxWip, max_tasks: plan.maxTasks }
       });
 
       await updateOnboardingStatus({ id, status: 'ready_for_validation' });
