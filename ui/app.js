@@ -351,8 +351,19 @@ async function refresh() {
     }
 
     const totalMs = Math.round(performance.now() - started);
-    const timing = `refresh: total=${totalMs}ms board_health=${summaryTiming.boardHealthMs}ms tasks=${coreTiming.tasksMs}ms activity=${coreTiming.activityMs}ms`;
+    const cardsReturned = Array.isArray(cachedTasks) ? cachedTasks.length : 0;
+    const timing = `refresh: total=${totalMs}ms board_health=${summaryTiming.boardHealthMs}ms tasks=${coreTiming.tasksMs}ms activity=${coreTiming.activityMs}ms mode=board cards=${cardsReturned}`;
     console.info(timing);
+    window.__mclTiming = {
+      total_refresh_ms: totalMs,
+      board_health_ms: summaryTiming.boardHealthMs,
+      tasks_ms: coreTiming.tasksMs,
+      activity_ms: coreTiming.activityMs,
+      render_mode: 'header_then_board',
+      board_mode: 'board',
+      cards_returned: cardsReturned,
+      at: new Date().toISOString()
+    };
     const timingEl = $('refreshTiming');
     if (timingEl) timingEl.textContent = timing;
   } catch (e) {
