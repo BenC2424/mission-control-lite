@@ -560,11 +560,9 @@ export const server = http.createServer(async (req, res) => {
 
       await updateOnboardingStatus({ id, status: 'provisioning' });
       const tpl = await getTeamTemplate(ob.requestedTeamType || 'general_team');
-      if (!tpl) {
-        await updateOnboardingStatus({ id, status: 'failed', notes: 'team template not found' });
-        return send(res, 400, { error: 'team_template_not_found' });
-      }
-      const template = JSON.parse(tpl.templateJson || '{}');
+      const template = tpl ? JSON.parse(tpl.templateJson || '{}') : {
+        agents: ['ultron', 'ops', 'codi', 'scout'].map((agentId) => ({ agentId, role: 'agent', enabled: 1 }))
+      };
       const agents = Array.isArray(template.agents) ? template.agents : [];
       for (const a of agents) {
         await addTenantAgent({ tenantId: ob.tenantId, agentId: a.agentId, role: a.role || 'agent', enabled: a.enabled ?? 1 });
