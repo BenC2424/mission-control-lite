@@ -753,12 +753,26 @@ export const server = http.createServer(async (req, res) => {
 
       const wouldScaleUp = reasons.length === 0;
 
+      const tempWorkerId = 'codi-temp-1';
+      const tempExists = tempWorkers.includes(tempWorkerId);
+      const tempStats = workerStats.get(tempWorkerId) || { assigned: 0, in_progress: 0 };
+      const tempIdle = Number(tempStats.in_progress || 0) === 0 && Number(tempStats.assigned || 0) === 0;
+      const backlogCleared = assignedForCapability < 2 && !wouldScaleUp;
+
+      const recentEvents = await listEvents(120);
+      const lastDownCheck = recentEvents.find((e) => e.type === 'worker_scale_down_check' && String(e.message || '').includes(tempWorkerId));
+      const prevQualified = !!(lastDownCheck && String(lastDownCheck.message).includes('qualified=1'));
+      const currentQualified = tempExists && backlogCleared && tempIdle;
+      const wouldScaleDown = currentQualified && prevQualified;
+
+      await addEvent({ type: 'worker_scale_down_check', message: `${tempWorkerId}|qualified=${currentQualified ? 1 : 0}|idle=${tempIdle ? 1 : 0}|backlogCleared=${backlogCleared ? 1 : 0}`, actor: 'scale-controller' });
+
       let scaleUp = { attempted: false, performed: false, worker: null, reason: null };
+      let scaleDown = { attempted: false, performed: false, worker: null, reason: null };
+
       if (apply) {
         scaleUp.attempted = true;
-        const tempWorkerId = 'codi-temp-1';
-        const exists = tempWorkers.includes(tempWorkerId);
-        if (exists) {
+        if (tempExists) {
           scaleUp.reason = 'temp_worker_already_exists';
         } else if (!wouldScaleUp) {
           scaleUp.reason = 'planner_conditions_not_met';
@@ -767,6 +781,23 @@ export const server = http.createServer(async (req, res) => {
           await setTenantAgentEnabled({ tenantId: accessCtx.tenantId, agentId: tempWorkerId, enabled: 1 });
           await addEvent({ type: 'worker_scale_up', message: `${tempWorkerId} activated (assigned_backlog_exceeds_capacity)`, actor: 'scale-controller' });
           scaleUp = { attempted: true, performed: true, worker: tempWorkerId, reason: 'assigned_backlog_exceeds_capacity' };
+        }
+
+        if (!scaleUp.performed) {
+          scaleDown.attempted = true;
+          if (!tempExists) {
+            scaleDown.reason = 'no_temp_worker_present';
+          } else if (!tempIdle) {
+            scaleDown.reason = 'temp_worker_not_idle';
+          } else if (!backlogCleared) {
+            scaleDown.reason = 'backlog_not_cleared';
+          } else if (!wouldScaleDown) {
+            scaleDown.reason = 'consecutive_qualifying_checks_not_met';
+          } else {
+            await setTenantAgentEnabled({ tenantId: accessCtx.tenantId, agentId: tempWorkerId, enabled: 0 });
+            await addEvent({ type: 'worker_scale_down', message: `${tempWorkerId} disabled (backlog_cleared_and_worker_idle)`, actor: 'scale-controller' });
+            scaleDown = { attempted: true, performed: true, worker: tempWorkerId, reason: 'backlog_cleared_and_worker_idle' };
+          }
         }
       }
 
@@ -785,12 +816,17 @@ export const server = http.createServer(async (req, res) => {
           active_worker_capacity: activeWorkerCapacity,
           assigned_for_capability: assignedForCapability,
           idle_workers_for_capability: idleWorkers,
-          saturated_workers_for_capability: saturatedWorkers
+          saturated_workers_for_capability: saturatedWorkers,
+          temp_worker_idle: tempIdle,
+          backlog_cleared: backlogCleared,
+          previous_scale_down_qualified: prevQualified
         },
         would_scale_up: wouldScaleUp,
-        recommendation: wouldScaleUp ? 'scale_up_candidate' : 'no_scale',
+        would_scale_down: wouldScaleDown,
+        recommendation: wouldScaleUp ? 'scale_up_candidate' : (wouldScaleDown ? 'scale_down_candidate' : 'no_scale'),
         reasons,
-        scale_up: scaleUp
+        scale_up: scaleUp,
+        scale_down: scaleDown
       });
     }
 
