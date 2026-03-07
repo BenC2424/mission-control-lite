@@ -52,7 +52,8 @@ import {
   addTenantUser,
   listTenantUsers,
   recordUsageEvent,
-  getUsageSummary
+  getUsageSummary,
+  getBoardHealthAggregates
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -436,55 +437,35 @@ export const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/autopilot/board-health' && req.method === 'GET') {
-      const tasks = await listTasks();
-      const nowMs = Date.now();
-      const toMs = (v) => {
-        const d = new Date(v || 0).getTime();
-        return Number.isFinite(d) ? d : 0;
-      };
-      const lastActivityMs = (t) => toMs(t.lastActivityAt || t.updatedAt || t.createdAt);
+      const [tenantTeam, agg] = await Promise.all([
+        listTenantAgents(),
+        getBoardHealthAggregates(accessCtx.tenantId)
+      ]);
 
-      const byStatus = tasks.reduce((acc, t) => { acc[t.status] = (acc[t.status] || 0) + 1; return acc; }, {});
-      const byOwner = tasks.reduce((acc, t) => { acc[t.owner] = (acc[t.owner] || 0) + 1; return acc; }, {});
-      const tenantTeam = await listTenantAgents();
-      const teamIds = new Set(tenantTeam.map((a) => a.agentId));
-      const teamWip = tasks.filter((t) => teamIds.has(t.owner)).reduce((acc, t) => {
-        if (!acc[t.owner]) acc[t.owner] = { in_progress: 0, assigned: 0, review: 0 };
-        if (t.status === 'in_progress') acc[t.owner].in_progress += 1;
-        if (t.status === 'assigned') acc[t.owner].assigned += 1;
-        if (t.status === 'review') acc[t.owner].review += 1;
-        return acc;
-      }, {});
-
-      const assignedStale = tasks.filter((t) => t.status === 'assigned' && (nowMs - lastActivityMs(t)) > 24 * 60 * 60 * 1000).length;
-      const inProgressStale = tasks.filter((t) => t.status === 'in_progress' && (nowMs - lastActivityMs(t)) > 8 * 60 * 60 * 1000).length;
-      const reviewStale = tasks.filter((t) => t.status === 'review' && (nowMs - lastActivityMs(t)) > 12 * 60 * 60 * 1000).length;
-
-      const inProgressTotal = byStatus.in_progress || 0;
-      const reviewTotal = byStatus.review || 0;
-      const since24hMs = nowMs - (24 * 60 * 60 * 1000);
-      const tasksCompleted24h = tasks.filter((t) => t.status === 'done' && toMs(t.updatedAt || t.createdAt) >= since24hMs).length;
+      const inProgressTotal = Number(agg.inProgressTotal || 0);
+      const reviewTotal = Number(agg.reviewTotal || 0);
+      const tasksCompleted24h = Number(agg.tasksCompleted24h || 0);
       const averageWip = Math.max(1, inProgressTotal);
       const flowRatio = Number((tasksCompleted24h / averageWip).toFixed(2));
       const flowColor = flowRatio >= 2 ? 'green' : flowRatio >= 1 ? 'yellow' : 'red';
-      const inboxOwnerViolations = tasks.filter((t) => t.status === 'inbox' && t.owner !== 'ops').length;
-      const ultronExecutionViolations = tasks.filter((t) => t.owner === 'ultron' && (t.status === 'assigned' || t.status === 'in_progress')).length;
+
+      const teamWip = agg.teamWip || {};
       const perAgentWipViolations = Object.values(teamWip).filter((v) => Number(v.in_progress || 0) > 1).length;
       const globalWipViolation = inProgressTotal > 4 ? 1 : 0;
       const reviewCapViolation = reviewTotal > 3 ? 1 : 0;
       const workerIds = tenantTeam.map((a) => a.agentId).filter((id) => id !== 'ultron' && id !== 'ops');
-      const assignedBacklog = tasks.filter((t) => t.status === 'assigned').length;
+      const assignedBacklog = Number((agg.byStatus || {}).assigned || 0);
       const idleWorkers = workerIds.filter((id) => ((teamWip[id]?.in_progress || 0) === 0));
 
       return send(res, 200, {
         ok: true,
         generated_at: now(),
-        open_total: tasks.filter((t) => t.status !== 'done' && t.status !== 'archived').length,
+        open_total: Number(agg.openTotal || 0),
         in_progress_total: inProgressTotal,
         review_total: reviewTotal,
-        blocked_total: byStatus.blocked || 0,
-        by_status: byStatus,
-        by_owner: byOwner,
+        blocked_total: Number(agg.blockedTotal || 0),
+        by_status: agg.byStatus || {},
+        by_owner: agg.byOwner || {},
         tenant_team: tenantTeam.map((a) => ({ agent_id: a.agentId, role: a.role })),
         team_wip: teamWip,
         working_by_status: teamWip,
@@ -495,19 +476,15 @@ export const server = http.createServer(async (req, res) => {
           average_wip: averageWip
         },
         contract_health: {
-          inbox_owner_violations: inboxOwnerViolations,
-          ultron_execution_violations: ultronExecutionViolations,
+          inbox_owner_violations: Number(agg.inboxOwnerViolations || 0),
+          ultron_execution_violations: Number(agg.ultronExecutionViolations || 0),
           per_agent_wip_violations: perAgentWipViolations,
           global_wip_violations: globalWipViolation,
           review_cap_violations: reviewCapViolation,
           idle_workers_with_assigned_backlog: assignedBacklog > 0 ? idleWorkers.length : 0,
           assigned_backlog: assignedBacklog
         },
-        stale_bins: {
-          assigned_gt_24h: assignedStale,
-          in_progress_gt_8h: inProgressStale,
-          review_gt_12h: reviewStale
-        },
+        stale_bins: agg.staleBins || { assigned_gt_24h: 0, in_progress_gt_8h: 0, review_gt_12h: 0 },
         review_pressure: reviewTotal > 3 ? 'high' : reviewTotal > 1 ? 'medium' : 'low',
         wip_pressure: inProgressTotal > 4 ? 'high' : inProgressTotal > 2 ? 'medium' : 'low'
       });
