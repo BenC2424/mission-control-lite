@@ -8,6 +8,7 @@ import { validateTaskCreate, validateTaskUpdate, VALID_PRIORITY } from './lib/va
 import {
   seedFromJsonIfEmpty,
   listTasks,
+  listTasksBoard,
   listEvents,
   createTask,
   updateTask,
@@ -191,7 +192,11 @@ export const server = http.createServer(async (req, res) => {
       const policy = loadPolicies();
       return send(res, 200, { templates: Object.keys(policy.templates || {}) });
     }
-    if (url.pathname === '/api/tasks' && req.method === 'GET') return send(res, 200, { version: 1, tasks: await listTasks() });
+    if (url.pathname === '/api/tasks' && req.method === 'GET') {
+      const mode = String(url.searchParams.get('mode') || 'board');
+      const tasks = mode === 'full' ? await listTasks() : await listTasksBoard();
+      return send(res, 200, { version: 1, mode, tasks });
+    }
     if (url.pathname === '/api/agents' && req.method === 'GET') {
       const payload = readJson(paths.agents);
       const agents = Array.isArray(payload.agents) ? payload.agents : [];
