@@ -462,6 +462,11 @@ export const server = http.createServer(async (req, res) => {
 
       const inProgressTotal = byStatus.in_progress || 0;
       const reviewTotal = byStatus.review || 0;
+      const since24hMs = nowMs - (24 * 60 * 60 * 1000);
+      const tasksCompleted24h = tasks.filter((t) => t.status === 'done' && toMs(t.updatedAt || t.createdAt) >= since24hMs).length;
+      const averageWip = Math.max(1, inProgressTotal);
+      const flowRatio = Number((tasksCompleted24h / averageWip).toFixed(2));
+      const flowColor = flowRatio >= 2 ? 'green' : flowRatio >= 1 ? 'yellow' : 'red';
 
       return send(res, 200, {
         ok: true,
@@ -474,6 +479,13 @@ export const server = http.createServer(async (req, res) => {
         by_owner: byOwner,
         tenant_team: tenantTeam.map((a) => ({ agent_id: a.agentId, role: a.role })),
         team_wip: teamWip,
+        working_by_status: teamWip,
+        flow_ratio: {
+          value: flowRatio,
+          color: flowColor,
+          tasks_completed_24h: tasksCompleted24h,
+          average_wip: averageWip
+        },
         stale_bins: {
           assigned_gt_24h: assignedStale,
           in_progress_gt_8h: inProgressStale,
@@ -482,6 +494,21 @@ export const server = http.createServer(async (req, res) => {
         review_pressure: reviewTotal > 3 ? 'high' : reviewTotal > 1 ? 'medium' : 'low',
         wip_pressure: inProgressTotal > 4 ? 'high' : inProgressTotal > 2 ? 'medium' : 'low'
       });
+    }
+
+    if (url.pathname === '/api/task/normalize-contract' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, ['tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
+      const tasks = await listTasks();
+      const normalized = [];
+      for (const t of tasks) {
+        if (t.status === 'inbox' && t.owner !== 'ops') {
+          const updated = await updateTask({ id: t.id, owner: 'ops', status: 'inbox' });
+          normalized.push({ id: t.id, from_owner: t.owner, to_owner: updated.owner });
+          await addEvent({ type: 'task_normalized', message: `${t.id} inbox owner normalized ${t.owner} -> ops`, taskId: t.id, actor: 'autopilot' });
+        }
+      }
+      return send(res, 200, { ok: true, normalized_count: normalized.length, normalized });
     }
 
     if (url.pathname === '/api/task/recovery-run' && req.method === 'POST') {
@@ -859,6 +886,37 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, taskId: body.taskId, assigned: body.agentIds.length });
     }
 
+    if (url.pathname === '/api/task/claim-next' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const lifecycle = await assertTenantLifecycleWriteAllowed(accessCtx.tenantId);
+      if (!lifecycle.ok) return send(res, 403, lifecycle);
+      const body = await parseBody(req);
+      const agentId = String(body.agentId || '').trim();
+      if (!agentId) return send(res, 400, { error: 'validation_failed', details: ['agentId required'] });
+      if (agentId === 'ultron') return send(res, 409, { error: 'invalid_owner_role', owner: 'ultron', disallowedStates: ['assigned', 'in_progress'] });
+
+      const existingWip = await listTasks();
+      const current = existingWip.find((t) => t.owner === agentId && t.status === 'in_progress');
+      if (current) return send(res, 200, { ok: true, claimed: false, task: current, reason: 'already_in_progress' });
+
+      const candidate = await claimNext(agentId);
+      if (!candidate) return send(res, 404, { error: 'no_assigned_task_available', agentId });
+
+      const ownerInProgress = await countTasksByOwnerAndStatus(agentId, 'in_progress', candidate.id);
+      if (ownerInProgress >= 1) return send(res, 409, { error: 'wip_limit_exceeded', scope: 'owner_in_progress', owner: agentId, limit: 1, current: ownerInProgress });
+
+      const tenantPlan = await getTenantPlan(accessCtx.tenantId);
+      const planLimits = tenantPlan ? JSON.parse(tenantPlan.limitsJson || '{}') : {};
+      const maxWipGlobal = Number(planLimits.max_wip || 4);
+      const globalInProgress = await countTasksByStatus('in_progress', candidate.id);
+      if (globalInProgress >= maxWipGlobal) return send(res, 409, { error: 'wip_limit_exceeded', scope: 'global_in_progress', limit: maxWipGlobal, current: globalInProgress });
+
+      const moved = await updateTask({ id: candidate.id, status: 'in_progress', owner: agentId });
+      await addEvent({ type: 'task_claimed', message: `${candidate.id} claimed by ${agentId}`, taskId: candidate.id, actor: body.actor || agentId });
+      await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId, eventType: 'task_execution', taskId: candidate.id, tokensUsed: 5, computeMs: 15 });
+      return send(res, 200, { ok: true, claimed: true, task: { id: moved.id, title: moved.title, status: moved.status, owner: moved.owner, priority: moved.priority } });
+    }
+
     if (url.pathname === '/api/orchestrate' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const body = await parseBody(req);
@@ -927,6 +985,15 @@ export const server = http.createServer(async (req, res) => {
 
       const targetStatus = patch.status || existing.status;
       const targetOwner = patch.owner || existing.owner;
+
+      if (targetStatus === 'inbox' && targetOwner !== 'ops') {
+        await logEvent('task_transition_denied', `${patch.id} denied -> inbox with owner ${targetOwner} (must be ops)`, patch.id, patch.actor || 'ui');
+        return send(res, 409, { error: 'invalid_inbox_owner', requiredOwner: 'ops', status: 'inbox' });
+      }
+      if (targetOwner === 'ultron' && (targetStatus === 'assigned' || targetStatus === 'in_progress')) {
+        await logEvent('task_transition_denied', `${patch.id} denied -> ${targetStatus} with owner ultron (execution states not allowed)`, patch.id, patch.actor || 'ui');
+        return send(res, 409, { error: 'invalid_owner_role', owner: 'ultron', disallowedStates: ['assigned', 'in_progress'] });
+      }
 
       const tenantPlan = await getTenantPlan(accessCtx.tenantId);
       const planLimits = tenantPlan ? JSON.parse(tenantPlan.limitsJson || '{}') : {};
