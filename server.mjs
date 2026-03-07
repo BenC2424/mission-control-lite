@@ -50,7 +50,9 @@ import {
   updateSubscriptionStatus,
   getSubscriptionByTenant,
   addTenantUser,
-  listTenantUsers
+  listTenantUsers,
+  recordUsageEvent,
+  getUsageSummary
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -562,6 +564,12 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, plans: plans.map((p) => ({ ...p, features: JSON.parse(p.featuresJson || '{}') })), tenantPlan: tenantPlan ? { ...tenantPlan, limits: JSON.parse(tenantPlan.limitsJson || '{}') } : null });
     }
 
+    if (url.pathname === '/api/usage' && req.method === 'GET') {
+      const period = String(url.searchParams.get('period') || '24h');
+      const usage = await getUsageSummary({ tenantId: accessCtx.tenantId, period });
+      return send(res, 200, { ok: true, ...usage });
+    }
+
     if (url.pathname === '/api/teams/catalog' && req.method === 'GET') {
       const tenantPlan = await getTenantPlan(accessCtx.tenantId);
       const plan = tenantPlan ? await getServicePlan(tenantPlan.planKey) : await getServicePlan('professional');
@@ -625,6 +633,7 @@ export const server = http.createServer(async (req, res) => {
       for (const a of toSeed) await addTenantAgent({ tenantId: accessCtx.tenantId, agentId: a.agentId, role: a.role || 'agent', enabled: a.enabled ?? 1 });
       for (const a of desired) await setTenantAgentEnabled({ tenantId: accessCtx.tenantId, agentId: a.agentId, enabled: 1 });
       await upsertTenantTeam({ tenantId: accessCtx.tenantId, teamKey, status: 'active' });
+      await recordUsageEvent({ tenantId: accessCtx.tenantId, teamKey, eventType: 'team_activated', computeMs: 10 });
       return send(res, 200, { ok: true, teamKey, status: 'active', agentsAdded: toSeed.length });
     }
 
@@ -645,6 +654,7 @@ export const server = http.createServer(async (req, res) => {
 
       for (const agentId of teamAgents) await setTenantAgentEnabled({ tenantId: accessCtx.tenantId, agentId, enabled: 0 });
       await upsertTenantTeam({ tenantId: accessCtx.tenantId, teamKey, status: 'inactive' });
+      await recordUsageEvent({ tenantId: accessCtx.tenantId, teamKey, eventType: 'team_deactivated', computeMs: 10 });
       return send(res, 200, { ok: true, teamKey, status: 'inactive', agentsDisabled: teamAgents.length });
     }
 
@@ -845,6 +855,7 @@ export const server = http.createServer(async (req, res) => {
       }
       for (const id of body.agentIds) await assignTask(body.taskId, id);
       await addEvent({ type: 'task_assigned', message: `${body.taskId} assigned to ${body.agentIds.join(', ')}`, taskId: body.taskId, actor: body.actor || 'ui' });
+      await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId: body.agentIds[0], eventType: 'task_execution', taskId: body.taskId, tokensUsed: 5, computeMs: 10 });
       return send(res, 200, { ok: true, taskId: body.taskId, assigned: body.agentIds.length });
     }
 
@@ -899,6 +910,7 @@ export const server = http.createServer(async (req, res) => {
       };
       await createTask(task);
       await logEvent('task_created', `${task.owner} created ${task.id}: ${task.title}`, task.id, task.owner);
+      await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId: task.owner, eventType: 'task_execution', taskId: task.id, tokensUsed: 50, computeMs: 100 });
       return send(res, 200, { ok: true, task });
     }
 
@@ -950,6 +962,7 @@ export const server = http.createServer(async (req, res) => {
       });
 
       await logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`, t.id, patch.actor || 'ui');
+      await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId: t.owner, eventType: t.status === 'done' ? 'task_completed' : 'task_execution', taskId: t.id, tokensUsed: 25, computeMs: 60 });
       return send(res, 200, { ok: true, task: {
         id: t.id, title: t.title, status: t.status, priority: t.priority, owner: t.owner, updatedAt: t.updated_at
       }});
@@ -962,6 +975,7 @@ export const server = http.createServer(async (req, res) => {
       if (!existing) return send(res, 404, { error: 'task not found' });
       await addNote(body.id, body.note || '', body.actor || 'ui');
       await logEvent('task_note', `${body.id}: ${body.note || ''}`, body.id, body.actor || 'ui');
+      await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId: body.actor || 'ui', eventType: 'analysis', taskId: body.id, tokensUsed: 10, computeMs: 20 });
       return send(res, 200, { ok: true });
     }
 
