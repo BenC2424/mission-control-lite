@@ -105,15 +105,33 @@ function getStandup(tasks) {
 }
 
 const DEFAULT_TENANT_ID = process.env.MCL_TENANT_ID || 'internal';
-function resolveTenantContext(req, url) {
-  const headerTenant = req.headers['x-tenant-id'];
-  const queryTenant = url.searchParams.get('tenant_id');
-  const tenantId = String(headerTenant || queryTenant || DEFAULT_TENANT_ID).trim();
+const VALID_ROLES = new Set(['tenant_user', 'tenant_ops', 'platform_admin']);
 
+function resolveAccessContext(req, url) {
+  const requestedTenant = String(req.headers['x-tenant-id'] || url.searchParams.get('tenant_id') || '').trim();
+  const authTenant = String(req.headers['x-auth-tenant-id'] || DEFAULT_TENANT_ID).trim();
+  const authRoleRaw = String(req.headers['x-auth-role'] || 'platform_admin').trim();
+  const role = VALID_ROLES.has(authRoleRaw) ? authRoleRaw : 'tenant_user';
+
+  if (!authTenant) return { ok: false, error: 'tenant_required' };
+
+  // Tenant-bound sessions cannot be overridden by request params/headers.
+  if (requestedTenant && requestedTenant !== authTenant && role !== 'platform_admin') {
+    return { ok: false, error: 'tenant_mismatch' };
+  }
+
+  const tenantId = requestedTenant && role === 'platform_admin' ? requestedTenant : authTenant;
   if (!tenantId) return { ok: false, error: 'tenant_required' };
-  // Foundation phase: internal tenant only (explicit enforcement before RLS).
-  if (tenantId !== DEFAULT_TENANT_ID) return { ok: false, error: 'invalid_tenant', tenantId };
-  return { ok: true, tenantId };
+
+  // Current production allows customer-facing access for internal tenant only.
+  if (tenantId !== DEFAULT_TENANT_ID) return { ok: false, error: 'invalid_tenant' };
+
+  return { ok: true, tenantId, role, userId: String(req.headers['x-auth-user-id'] || 'internal-user') };
+}
+
+function canAccess(role, allowed = []) {
+  if (role === 'platform_admin') return true;
+  return allowed.includes(role);
 }
 
 export const server = http.createServer(async (req, res) => {
@@ -127,9 +145,10 @@ export const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/config' && req.method === 'GET') return send(res, 200, { readOnly: READ_ONLY });
 
     const tenantScoped = url.pathname.startsWith('/api/');
+    let accessCtx = { ok: true, tenantId: DEFAULT_TENANT_ID, role: 'platform_admin', userId: 'internal-user' };
     if (tenantScoped) {
-      const tenantCtx = resolveTenantContext(req, url);
-      if (!tenantCtx.ok) return send(res, 400, { error: tenantCtx.error });
+      accessCtx = resolveAccessContext(req, url);
+      if (!accessCtx.ok) return send(res, 400, { error: accessCtx.error });
     }
 
     if (url.pathname === '/api/metrics' && req.method === 'GET') return send(res, 200, await getMetrics());
@@ -267,6 +286,7 @@ export const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/heartbeat/restart-run' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, ['tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
       const body = await parseBody(req);
       const report = await (async () => {
         const m = await getMetrics();
@@ -433,6 +453,7 @@ export const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/task/recovery-run' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, ['tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
       const body = await parseBody(req);
       const onlyAgent = body.agentId || null;
 
