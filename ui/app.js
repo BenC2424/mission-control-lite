@@ -146,13 +146,14 @@ function filteredTasks() {
 
 function renderAgents() {
   const list = $('agentList'); list.innerHTML = '';
+  const wipMap = boardHealth?.team_wip || {};
   for (const a of cachedAgents) {
-    const owned = cachedTasks.filter((t) => t.owner === a.id);
-    const blocked = owned.some((t) => t.status === 'blocked');
-    const working = owned.some((t) => ['assigned','in_progress','review'].includes(t.status));
+    const w = wipMap[a.id] || { in_progress: 0, assigned: 0, review: 0 };
+    const blocked = w.review > 2;
+    const working = w.in_progress > 0 || w.assigned > 0;
     const status = blocked ? 'blocked' : working ? 'working' : 'idle';
     const div = document.createElement('div'); div.className = `agent ${agentTone[a.id] || ''}`;
-    div.innerHTML = `<div>${ownerChip(a.id)} <span class="badge ${status}">${status}</span></div><div class="muted">${a.role}</div><div class="muted">tasks: ${owned.length}</div>`;
+    div.innerHTML = `<div>${ownerChip(a.id)} <span class="badge ${status}">${status}</span></div><div class="muted">${a.role}</div><div class="muted">wip: ${w.in_progress} • assigned: ${w.assigned} • review: ${w.review}</div>`;
     list.appendChild(div);
   }
 }
@@ -210,8 +211,9 @@ function renderBoard() {
 
 function renderFeed() {
   const feed = $('feed'); feed.innerHTML = '';
+  const signalTypes = new Set(['contract_violation_detected','contract_violation_fixed','auto_claim_executed','task_recovered','task_transition_denied','escalation']);
   cachedEvents
-    .filter((e) => feedType === 'all' || e.type === feedType)
+    .filter((e) => (feedType === 'all' ? signalTypes.has(e.type) : e.type === feedType))
     .slice(0, feedLimit)
     .forEach((e) => {
       const div = document.createElement('div'); div.className = 'feed-item';
@@ -346,6 +348,30 @@ function renderMetrics() {
   const completed = Number(a.completedAssignments || 0);
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
   $('assignmentHealth').textContent = `assignment health: ${completed}/${total} completed (${pct}%) • in-flight ${a.inFlightAssignments || 0}`;
+
+  // Tower health bar + diagnostics
+  const ch = boardHealth?.contract_health || {};
+  const stale = boardHealth?.stale_bins || {};
+  const totalStale = Number(stale.assigned_gt_24h || 0) + Number(stale.in_progress_gt_8h || 0) + Number(stale.review_gt_12h || 0);
+  $('health-flow-value').textContent = String(flow?.value ?? 'n/a');
+  const healthFlowTile = $('health-flow');
+  if (healthFlowTile) {
+    healthFlowTile.classList.remove('flow-green', 'flow-yellow', 'flow-red');
+    healthFlowTile.classList.add(flow?.color === 'green' ? 'flow-green' : flow?.color === 'yellow' ? 'flow-yellow' : 'flow-red');
+  }
+  $('health-wip').textContent = `${byStatus.in_progress || 0}/4`;
+  $('health-review').textContent = `${byStatus.review || 0}/3`;
+  $('health-stale').textContent = String(totalStale);
+  $('health-escalations').textContent = String(metrics?.escalationCount ?? 0);
+  const healthyAgents = cachedAgents.filter((a) => (boardHealth?.team_wip?.[a.id]?.in_progress || 0) <= 1).length;
+  $('health-agents').textContent = `${healthyAgents}/${cachedAgents.length}`;
+
+  $('diag-throughput').textContent = String(flow?.tasks_completed_24h ?? 0);
+  $('diag-avgwip').textContent = String(flow?.average_wip ?? 0);
+  $('diag-assigned').textContent = String(ch.assigned_backlog ?? byStatus.assigned ?? 0);
+  $('diag-inbox').textContent = String(byStatus.inbox ?? 0);
+  $('diag-review').textContent = String(byStatus.review ?? 0);
+  $('diag-stale').textContent = String(totalStale);
 }
 
 function openDrawer(id) {

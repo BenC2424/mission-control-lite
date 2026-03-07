@@ -50,6 +50,31 @@
     </header>
 
     <div id="flash" class="flash hidden"></div>
+
+    <section class="panel tower-health" id="towerHealth">
+      <h2>System Health</h2>
+      <div class="metrics">
+        <div class="metric" id="health-flow"><span id="health-flow-value">n/a</span><label>Flow Ratio</label></div>
+        <div class="metric"><span id="health-wip">0/4</span><label>WIP</label></div>
+        <div class="metric"><span id="health-review">0/3</span><label>Review Queue</label></div>
+        <div class="metric"><span id="health-stale">0</span><label>Stale Tasks</label></div>
+        <div class="metric"><span id="health-escalations">0</span><label>Escalations</label></div>
+        <div class="metric"><span id="health-agents">0/0</span><label>Agents Healthy</label></div>
+      </div>
+    </section>
+
+    <section class="panel tower-health" id="towerFlow">
+      <h2>Flow Diagnostics</h2>
+      <div class="metrics">
+        <div class="metric"><span id="diag-throughput">0</span><label>Throughput 24h</label></div>
+        <div class="metric"><span id="diag-avgwip">0</span><label>Average WIP</label></div>
+        <div class="metric"><span id="diag-assigned">0</span><label>Assigned Backlog</label></div>
+        <div class="metric"><span id="diag-inbox">0</span><label>Inbox Backlog</label></div>
+        <div class="metric"><span id="diag-review">0</span><label>Review Backlog</label></div>
+        <div class="metric"><span id="diag-stale">0</span><label>Stale Total</label></div>
+      </div>
+    </section>
+
     <div id="refreshTiming" class="muted" style="margin:6px 14px 0;">refresh: idle</div>
     <div class="filters panel">
       <label>Owner
