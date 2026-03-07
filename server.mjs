@@ -40,7 +40,10 @@ import {
   listServicePlans,
   getServicePlan,
   setTenantPlan,
-  getTenantPlan
+  getTenantPlan,
+  upsertSubscription,
+  updateSubscriptionStatus,
+  getSubscriptionByTenant
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -143,6 +146,15 @@ function resolveAccessContext(req, url) {
 function canAccess(role, allowed = []) {
   if (role === 'platform_admin') return true;
   return allowed.includes(role);
+}
+
+async function assertTenantLifecycleWriteAllowed(tenantId) {
+  const plan = await getTenantPlan(tenantId);
+  const status = plan?.status || 'active';
+  if (status === 'suspended' || status === 'canceled') {
+    return { ok: false, error: 'tenant_lifecycle_blocked', status };
+  }
+  return { ok: true, status };
 }
 
 export const server = http.createServer(async (req, res) => {
@@ -588,10 +600,18 @@ export const server = http.createServer(async (req, res) => {
         await addTenantAgent({ tenantId: ob.tenantId, agentId: a.agentId, role: a.role || 'agent', enabled: a.enabled ?? 1 });
       }
 
+      const sub = await upsertSubscription({
+        tenantId: ob.tenantId,
+        planKey: plan.planKey,
+        status: 'trial',
+        billingProvider: 'manual'
+      });
+
       await setTenantPlan({
         tenantId: ob.tenantId,
         planKey: plan.planKey,
-        status: 'active',
+        subscriptionId: sub?.id || null,
+        status: 'trial',
         activatedAt: now(),
         limits: { max_agents: plan.maxAgents, max_wip: plan.maxWip, max_tasks: plan.maxTasks }
       });
@@ -622,6 +642,11 @@ export const server = http.createServer(async (req, res) => {
       const pass = Object.values(checks).every(Boolean);
 
       if (pass) {
+        const tp = await getTenantPlan(ob.tenantId);
+        if (tp?.planKey) {
+          await setTenantPlan({ tenantId: ob.tenantId, planKey: tp.planKey, subscriptionId: tp.subscriptionId || null, status: 'active', activatedAt: now(), limits: JSON.parse(tp.limitsJson || '{}') });
+          await updateSubscriptionStatus({ tenantId: ob.tenantId, status: 'active' });
+        }
         await updateOnboardingStatus({ id, status: 'active', activatedAt: now(), validation: checks });
         await addEvent({ type: 'onboarding_active', message: `${id} tenant=${ob.tenantId}`, actor: 'platform_admin' });
         return send(res, 200, { ok: true, onboardingId: id, tenantId: ob.tenantId, status: 'active', checks });
@@ -639,8 +664,45 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, onboarding: ob });
     }
 
+    if (url.pathname === '/api/billing/webhook' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, [])) return send(res, 403, { error: 'forbidden_role' });
+      const body = await parseBody(req);
+      const tenantId = String(body.tenantId || '').trim();
+      const eventType = String(body.eventType || '').trim();
+      const nextStatus = String(body.status || '').trim();
+      if (!tenantId || !eventType || !nextStatus) return send(res, 400, { error: 'validation_failed', details: ['tenantId,eventType,status required'] });
+
+      const allowed = new Set(['trial','active','past_due','suspended','canceled']);
+      if (!allowed.has(nextStatus)) return send(res, 400, { error: 'invalid_status' });
+
+      await updateSubscriptionStatus({
+        tenantId,
+        status: nextStatus,
+        currentPeriodStart: body.currentPeriodStart || null,
+        currentPeriodEnd: body.currentPeriodEnd || null
+      });
+
+      const tp = await getTenantPlan(tenantId);
+      if (tp?.planKey) {
+        await setTenantPlan({
+          tenantId,
+          planKey: tp.planKey,
+          subscriptionId: tp.subscriptionId || null,
+          status: nextStatus,
+          activatedAt: tp.activatedAt || now(),
+          limits: JSON.parse(tp.limitsJson || '{}')
+        });
+      }
+
+      await addEvent({ type: 'billing_webhook', message: `${eventType} tenant=${tenantId} status=${nextStatus}`, actor: 'billing' });
+      return send(res, 200, { ok: true, tenantId, status: nextStatus });
+    }
+
     if (url.pathname === '/api/task/assign' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const lifecycle = await assertTenantLifecycleWriteAllowed(accessCtx.tenantId);
+      if (!lifecycle.ok) return send(res, 403, lifecycle);
       const body = await parseBody(req);
       if (!body.taskId || !Array.isArray(body.agentIds) || body.agentIds.length === 0) {
         return send(res, 400, { error: 'validation_failed', details: ['taskId and non-empty agentIds[] required'] });
@@ -684,6 +746,8 @@ export const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/task/create' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const lifecycle = await assertTenantLifecycleWriteAllowed(accessCtx.tenantId);
+      if (!lifecycle.ok) return send(res, 403, lifecycle);
       const body = await parseBody(req);
       const validation = validateTaskCreate(body);
       if (!validation.ok) return send(res, 400, { error: 'validation_failed', details: validation.errors });
@@ -704,6 +768,8 @@ export const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/task/update' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const lifecycle = await assertTenantLifecycleWriteAllowed(accessCtx.tenantId);
+      if (!lifecycle.ok) return send(res, 403, lifecycle);
       const patch = await parseBody(req);
       const validation = validateTaskUpdate(patch);
       if (!validation.ok) return send(res, 400, { error: 'validation_failed', details: validation.errors });
