@@ -677,24 +677,27 @@ export const server = http.createServer(async (req, res) => {
       const allowed = new Set(['trial','active','past_due','suspended','canceled']);
       if (!allowed.has(nextStatus)) return send(res, 400, { error: 'invalid_status' });
 
-      await updateSubscriptionStatus({
+      const tp = await getTenantPlan(tenantId);
+      const planKey = tp?.planKey || 'professional';
+      const sub = await upsertSubscription({
         tenantId,
+        planKey,
         status: nextStatus,
+        billingProvider: body.billingProvider || 'manual',
+        providerCustomerId: body.providerCustomerId || null,
+        providerSubscriptionId: body.providerSubscriptionId || null,
         currentPeriodStart: body.currentPeriodStart || null,
         currentPeriodEnd: body.currentPeriodEnd || null
       });
 
-      const tp = await getTenantPlan(tenantId);
-      if (tp?.planKey) {
-        await setTenantPlan({
-          tenantId,
-          planKey: tp.planKey,
-          subscriptionId: tp.subscriptionId || null,
-          status: nextStatus,
-          activatedAt: tp.activatedAt || now(),
-          limits: JSON.parse(tp.limitsJson || '{}')
-        });
-      }
+      await setTenantPlan({
+        tenantId,
+        planKey,
+        subscriptionId: sub?.id || tp?.subscriptionId || null,
+        status: nextStatus,
+        activatedAt: tp?.activatedAt || now(),
+        limits: tp ? JSON.parse(tp.limitsJson || '{}') : {}
+      });
 
       await addEvent({ type: 'billing_webhook', message: `${eventType} tenant=${tenantId} status=${nextStatus}`, actor: 'billing' });
       return send(res, 200, { ok: true, tenantId, status: nextStatus });
