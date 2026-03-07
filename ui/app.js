@@ -372,6 +372,66 @@ function renderMetrics() {
   $('diag-inbox').textContent = String(byStatus.inbox ?? 0);
   $('diag-review').textContent = String(byStatus.review ?? 0);
   $('diag-stale').textContent = String(totalStale);
+
+  // Phase 2: capacity + bottleneck awareness
+  const teamWip = boardHealth?.team_wip || {};
+  const capacityEl = $('capacityPanel');
+  if (capacityEl) {
+    const rows = cachedAgents.map((agent) => {
+      const w = teamWip[agent.id] || { in_progress: 0, assigned: 0, review: 0 };
+      const util = agent.id === 'ops' ? Math.min(100, Number(byStatus.inbox || 0)) : Math.min(100, (Number(w.in_progress || 0) / 1) * 100);
+      const tone = util >= 100 ? '🔴' : util >= 70 ? '🟡' : '🟢';
+      return `<div class="kv"><span>${agent.id} — WIP ${w.in_progress}/1 • Assigned ${w.assigned}</span><span>${util}% ${tone}</span></div>`;
+    });
+    capacityEl.innerHTML = rows.join('');
+  }
+
+  const assignedBacklog = Number(ch.assigned_backlog ?? byStatus.assigned ?? 0);
+  const reviewBacklog = Number(byStatus.review ?? 0);
+  const inboxBacklog = Number(byStatus.inbox ?? 0);
+  const availableWorkers = cachedAgents.filter((a) => !['ops','ultron'].includes(a.id)).filter((a) => Number(teamWip[a.id]?.in_progress || 0) === 0).length;
+  const execBottleneck = assignedBacklog > 0 && availableWorkers === 0;
+  const reviewBottleneck = reviewBacklog > 3;
+  const triageBottleneck = inboxBacklog > 40;
+
+  const bottleneckEl = $('bottleneckPanel');
+  if (bottleneckEl) {
+    bottleneckEl.innerHTML = [
+      `<div class="kv"><span>Execution bottleneck</span><span>${execBottleneck ? 'YES 🔴' : 'NO 🟢'}</span></div>`,
+      `<div class="kv"><span>Review bottleneck</span><span>${reviewBottleneck ? 'YES 🔴' : 'NO 🟢'}</span></div>`,
+      `<div class="kv"><span>Triage bottleneck</span><span>${triageBottleneck ? 'YES 🟡' : 'NO 🟢'}</span></div>`,
+      `<div class="kv"><span>Available workers</span><span>${availableWorkers}</span></div>`
+    ].join('');
+  }
+
+  const ageBins = { '0-2h': 0, '2-8h': 0, '8-24h': 0, '24h+': 0 };
+  const openTasks = cachedTasks.filter((t) => !['done','archived'].includes(t.status));
+  const nowMs = Date.now();
+  for (const t of openTasks) {
+    const at = new Date(t.updatedAt || t.createdAt || 0).getTime();
+    const ageH = Math.max(0, (nowMs - at) / 3600000);
+    if (ageH < 2) ageBins['0-2h'] += 1;
+    else if (ageH < 8) ageBins['2-8h'] += 1;
+    else if (ageH < 24) ageBins['8-24h'] += 1;
+    else ageBins['24h+'] += 1;
+  }
+  const ageEl = $('backlogAgePanel');
+  if (ageEl) {
+    ageEl.innerHTML = Object.entries(ageBins).map(([k,v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join('');
+  }
+
+  const incidents = [
+    flow && Number(flow.value || 0) < 0.8,
+    totalStale > 100,
+    Number(ch.inbox_owner_violations || 0) > 0,
+    assignedBacklog > 0 && availableWorkers === 0
+  ].filter(Boolean).length;
+  const incidentEl = $('incidentBanner');
+  if (incidentEl) {
+    incidentEl.classList.remove('warn', 'alert');
+    if (incidents > 0) incidentEl.classList.add(incidents > 1 ? 'alert' : 'warn');
+    incidentEl.textContent = `SYSTEM INCIDENTS: ${incidents} active`;
+  }
 }
 
 function openDrawer(id) {
