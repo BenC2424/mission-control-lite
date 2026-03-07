@@ -467,6 +467,14 @@ export const server = http.createServer(async (req, res) => {
       const averageWip = Math.max(1, inProgressTotal);
       const flowRatio = Number((tasksCompleted24h / averageWip).toFixed(2));
       const flowColor = flowRatio >= 2 ? 'green' : flowRatio >= 1 ? 'yellow' : 'red';
+      const inboxOwnerViolations = tasks.filter((t) => t.status === 'inbox' && t.owner !== 'ops').length;
+      const ultronExecutionViolations = tasks.filter((t) => t.owner === 'ultron' && (t.status === 'assigned' || t.status === 'in_progress')).length;
+      const perAgentWipViolations = Object.values(teamWip).filter((v) => Number(v.in_progress || 0) > 1).length;
+      const globalWipViolation = inProgressTotal > 4 ? 1 : 0;
+      const reviewCapViolation = reviewTotal > 3 ? 1 : 0;
+      const workerIds = tenantTeam.map((a) => a.agentId).filter((id) => id !== 'ultron' && id !== 'ops');
+      const assignedBacklog = tasks.filter((t) => t.status === 'assigned').length;
+      const idleWorkers = workerIds.filter((id) => ((teamWip[id]?.in_progress || 0) === 0));
 
       return send(res, 200, {
         ok: true,
@@ -485,6 +493,15 @@ export const server = http.createServer(async (req, res) => {
           color: flowColor,
           tasks_completed_24h: tasksCompleted24h,
           average_wip: averageWip
+        },
+        contract_health: {
+          inbox_owner_violations: inboxOwnerViolations,
+          ultron_execution_violations: ultronExecutionViolations,
+          per_agent_wip_violations: perAgentWipViolations,
+          global_wip_violations: globalWipViolation,
+          review_cap_violations: reviewCapViolation,
+          idle_workers_with_assigned_backlog: assignedBacklog > 0 ? idleWorkers.length : 0,
+          assigned_backlog: assignedBacklog
         },
         stale_bins: {
           assigned_gt_24h: assignedStale,
@@ -509,6 +526,142 @@ export const server = http.createServer(async (req, res) => {
         }
       }
       return send(res, 200, { ok: true, normalized_count: normalized.length, normalized });
+    }
+
+
+    if (url.pathname === '/api/contract/watchdog-run' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, ['tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
+
+      const runId = `watchdog-${Date.now()}`;
+      const tasks = await listTasks();
+      const tenantAgents = await listTenantAgents();
+      const teamIds = new Set(tenantAgents.map((a) => a.agentId));
+      const teamWip = tasks.filter((t) => teamIds.has(t.owner)).reduce((acc, t) => {
+        if (!acc[t.owner]) acc[t.owner] = { in_progress: 0, assigned: 0, review: 0 };
+        if (t.status === 'in_progress') acc[t.owner].in_progress += 1;
+        if (t.status === 'assigned') acc[t.owner].assigned += 1;
+        if (t.status === 'review') acc[t.owner].review += 1;
+        return acc;
+      }, {});
+
+      const violationsFound = [];
+      const violationsFixed = [];
+      const violationsFlagged = [];
+      const recommendedActions = [];
+
+      const inboxViolations = tasks.filter((t) => t.status === 'inbox' && t.owner !== 'ops');
+      for (const t of inboxViolations) {
+        violationsFound.push({ kind: 'inbox_owner_violation', taskId: t.id, owner: t.owner });
+        await addEvent({ type: 'contract_violation_detected', message: `${t.id} inbox owner ${t.owner} (must be ops)`, taskId: t.id, actor: 'watchdog' });
+        const updated = await updateTask({ id: t.id, owner: 'ops', status: 'inbox' });
+        await addEvent({ type: 'contract_violation_fixed', message: `${t.id} inbox owner normalized ${t.owner} -> ${updated.owner}`, taskId: t.id, actor: 'watchdog' });
+        violationsFixed.push({ kind: 'inbox_owner_violation', taskId: t.id, from: t.owner, to: updated.owner });
+      }
+
+      const ultronExec = tasks.filter((t) => t.owner === 'ultron' && (t.status === 'assigned' || t.status === 'in_progress'));
+      for (const t of ultronExec) {
+        violationsFound.push({ kind: 'ultron_execution_violation', taskId: t.id, status: t.status });
+        violationsFlagged.push({ kind: 'ultron_execution_violation', taskId: t.id, status: t.status });
+        await addEvent({ type: 'contract_violation_detected', message: `${t.id} ultron in ${t.status} (execution states disallowed)`, taskId: t.id, actor: 'watchdog' });
+      }
+
+      for (const [agentId, v] of Object.entries(teamWip)) {
+        if (Number(v.in_progress || 0) > 1) {
+          violationsFound.push({ kind: 'per_agent_wip_violation', agentId, in_progress: v.in_progress });
+          violationsFlagged.push({ kind: 'per_agent_wip_violation', agentId, in_progress: v.in_progress });
+          await addEvent({ type: 'contract_violation_detected', message: `${agentId} in_progress ${v.in_progress} > 1`, actor: 'watchdog' });
+        }
+      }
+
+      const inProgressTotal = tasks.filter((t) => t.status === 'in_progress').length;
+      if (inProgressTotal > 4) {
+        violationsFound.push({ kind: 'global_wip_violation', in_progress: inProgressTotal, limit: 4 });
+        violationsFlagged.push({ kind: 'global_wip_violation', in_progress: inProgressTotal, limit: 4 });
+        await addEvent({ type: 'contract_violation_detected', message: `global in_progress ${inProgressTotal} > 4`, actor: 'watchdog' });
+      }
+
+      const reviewTotal = tasks.filter((t) => t.status === 'review').length;
+      if (reviewTotal > 3) {
+        violationsFound.push({ kind: 'review_cap_violation', review: reviewTotal, limit: 3 });
+        violationsFlagged.push({ kind: 'review_cap_violation', review: reviewTotal, limit: 3 });
+        await addEvent({ type: 'contract_violation_detected', message: `review ${reviewTotal} > 3`, actor: 'watchdog' });
+      }
+
+      const workerIds = tenantAgents.map((a) => a.agentId).filter((id) => id !== 'ultron' && id !== 'ops');
+      const assignedBacklog = tasks.filter((t) => t.status === 'assigned').length;
+      const idleWorkers = workerIds.filter((id) => ((teamWip[id]?.in_progress || 0) === 0));
+      if (assignedBacklog > 0 && idleWorkers.length > 0) {
+        violationsFound.push({ kind: 'idle_workers_with_assigned_backlog', idle_workers: idleWorkers.length, assigned_backlog: assignedBacklog });
+        violationsFlagged.push({ kind: 'idle_workers_with_assigned_backlog', idle_workers: idleWorkers.length, assigned_backlog: assignedBacklog });
+        recommendedActions.push('run_supervisor');
+      }
+
+      return send(res, 200, {
+        ok: true,
+        run_id: runId,
+        violations_found: violationsFound.length,
+        violations_fixed: violationsFixed.length,
+        violations_flagged: violationsFlagged.length,
+        found: violationsFound,
+        fixed: violationsFixed,
+        flagged: violationsFlagged,
+        recommended_actions: recommendedActions
+      });
+    }
+
+    if (url.pathname === '/api/contract/supervisor-run' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, ['tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
+
+      const runId = `supervisor-${Date.now()}`;
+      const body = await parseBody(req);
+      const maxClaims = Math.max(1, Math.min(Number(body.maxClaims || 4), 10));
+      const tenantAgents = await listTenantAgents();
+      const eligibleWorkers = tenantAgents.filter((a) => a.enabled && a.agentId !== 'ultron' && a.agentId !== 'ops').map((a) => a.agentId);
+
+      const tenantPlan = await getTenantPlan(accessCtx.tenantId);
+      const planLimits = tenantPlan ? JSON.parse(tenantPlan.limitsJson || '{}') : {};
+      const maxWipGlobal = Number(planLimits.max_wip || 4);
+
+      const claimed = [];
+      const skipped = [];
+
+      for (const agentId of eligibleWorkers) {
+        if (claimed.length >= maxClaims) break;
+
+        const snapshot = await listTasks();
+        const globalInProgress = snapshot.filter((t) => t.status === 'in_progress').length;
+        if (globalInProgress >= maxWipGlobal) {
+          skipped.push({ agent_id: agentId, reason: 'global_wip_cap_reached', current: globalInProgress, limit: maxWipGlobal });
+          break;
+        }
+
+        const existing = snapshot.find((t) => t.owner === agentId && t.status === 'in_progress');
+        if (existing) {
+          skipped.push({ agent_id: agentId, reason: 'already_in_progress', task_id: existing.id });
+          continue;
+        }
+
+        const candidate = await claimNext(agentId);
+        if (!candidate) {
+          skipped.push({ agent_id: agentId, reason: 'no_assigned_task_available' });
+          continue;
+        }
+
+        const ownerInProgress = await countTasksByOwnerAndStatus(agentId, 'in_progress', candidate.id);
+        if (ownerInProgress >= 1) {
+          skipped.push({ agent_id: agentId, reason: 'owner_wip_cap_reached', current: ownerInProgress, limit: 1 });
+          continue;
+        }
+
+        const moved = await updateTask({ id: candidate.id, status: 'in_progress', owner: agentId });
+        await addEvent({ type: 'auto_claim_executed', message: `${candidate.id} auto-claimed by ${agentId}`, taskId: candidate.id, actor: 'supervisor' });
+        await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId, eventType: 'task_execution', taskId: candidate.id, tokensUsed: 5, computeMs: 15 });
+        claimed.push({ agent_id: agentId, task_id: moved.id });
+      }
+
+      return send(res, 200, { ok: true, run_id: runId, claimed_count: claimed.length, claimed, skipped_count: skipped.length, skipped });
     }
 
     if (url.pathname === '/api/task/recovery-run' && req.method === 'POST') {
