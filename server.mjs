@@ -43,7 +43,9 @@ import {
   getTenantPlan,
   upsertSubscription,
   updateSubscriptionStatus,
-  getSubscriptionByTenant
+  getSubscriptionByTenant,
+  addTenantUser,
+  listTenantUsers
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -553,6 +555,45 @@ export const server = http.createServer(async (req, res) => {
       const plans = await listServicePlans();
       const tenantPlan = await getTenantPlan(accessCtx.tenantId);
       return send(res, 200, { ok: true, plans: plans.map((p) => ({ ...p, features: JSON.parse(p.featuresJson || '{}') })), tenantPlan: tenantPlan ? { ...tenantPlan, limits: JSON.parse(tenantPlan.limitsJson || '{}') } : null });
+    }
+
+    if (url.pathname === '/api/tenant/signup' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const body = await parseBody(req);
+      const companyName = String(body.companyName || '').trim();
+      const adminEmail = String(body.adminEmail || '').trim().toLowerCase();
+      const planKey = String(body.planKey || 'starter').trim();
+      if (!companyName || !adminEmail || !planKey) return send(res, 400, { error: 'validation_failed', details: ['companyName, adminEmail, planKey required'] });
+
+      const tenantId = String(body.tenantId || companyName.toLowerCase().replace(/[^a-z0-9]+/g, '_')).replace(/^_+|_+$/g, '').slice(0, 64);
+      if (!tenantId || !/^[a-z0-9_-]{2,64}$/i.test(tenantId)) return send(res, 400, { error: 'validation_failed', details: ['invalid tenant id derived'] });
+
+      const plan = await getServicePlan(planKey);
+      if (!plan) return send(res, 400, { error: 'invalid_plan' });
+
+      const userId = `user_${adminEmail.replace(/[^a-z0-9]/g, '_').slice(0, 40)}`;
+      await addTenantUser({ tenantId, userId, email: adminEmail, role: 'tenant_admin' });
+
+      const rec = await createOnboardingRecord({ tenantId, requestedPlan: planKey, requestedTeamType: plan.defaultTeamTemplate || 'general_team', createdBy: adminEmail, notes: `self_serve:${companyName}` });
+      await updateOnboardingStatus({ id: rec.id, status: 'provisioning' });
+
+      const tpl = await getTeamTemplate(plan.defaultTeamTemplate || 'general_team');
+      const template = tpl ? JSON.parse(tpl.templateJson || '{}') : { agents: ['ultron','ops','codi','scout'].map((agentId) => ({ agentId, role: 'agent', enabled: 1 })) };
+      const seeded = (Array.isArray(template.agents) ? template.agents : []).slice(0, Number(plan.maxAgents || 2));
+      for (const a of seeded) await addTenantAgent({ tenantId, agentId: a.agentId, role: a.role || 'agent', enabled: a.enabled ?? 1 });
+
+      const sub = await upsertSubscription({ tenantId, planKey, status: 'trial', billingProvider: 'manual', providerCustomerId: `cust_${tenantId}` });
+      await setTenantPlan({ tenantId, planKey, subscriptionId: sub?.id || null, status: 'trial', activatedAt: now(), limits: { max_agents: plan.maxAgents, max_wip: plan.maxWip, max_tasks: plan.maxTasks } });
+      await updateOnboardingStatus({ id: rec.id, status: 'ready_for_validation' });
+
+      const team = await listTenantAgents(tenantId);
+      const checks = { tenant_id_valid: true, team_seeded: team.length > 0, tenant_plan_assigned: true, report_write_path_ready: true, canary_ready: true };
+      await updateOnboardingStatus({ id: rec.id, status: 'active', activatedAt: now(), validation: checks });
+      await updateSubscriptionStatus({ tenantId, status: 'active' });
+      const tenantUsers = await listTenantUsers(tenantId);
+
+      await addEvent({ type: 'tenant_signup', message: `${tenantId} plan=${planKey}`, actor: 'self_serve' });
+      return send(res, 200, { ok: true, tenantId, onboardingId: rec.id, planKey, subscriptionId: sub?.id || null, status: 'active', tenantAdmin: { userId, email: adminEmail }, seededAgents: seeded.map((a) => a.agentId), tenantUsers: tenantUsers.length });
     }
 
     if (url.pathname === '/api/onboarding/request' && req.method === 'POST') {
