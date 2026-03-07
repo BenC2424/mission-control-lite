@@ -646,6 +646,64 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, run_id: runId, claimed_count: claimed.length, claimed, skipped_count: skipped.length, skipped });
     }
 
+    if (url.pathname === '/api/contract/load-balance-run' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, ['tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
+
+      const runId = `loadbal-${Date.now()}`;
+      const body = await parseBody(req);
+      const maxMoves = Math.max(1, Math.min(Number(body.maxMoves || 2), 10));
+      const tasks = await listTasks();
+      const tenantAgents = await listTenantAgents();
+      const workers = tenantAgents.map((a) => a.agentId).filter((id) => id !== 'ultron' && id !== 'ops');
+
+      const byWorker = new Map();
+      for (const worker of workers) byWorker.set(worker, { assigned: 0, in_progress: 0 });
+      for (const t of tasks) {
+        if (!workers.includes(t.owner)) continue;
+        const cur = byWorker.get(t.owner) || { assigned: 0, in_progress: 0 };
+        if (t.status === 'assigned') cur.assigned += 1;
+        if (t.status === 'in_progress') cur.in_progress += 1;
+        byWorker.set(t.owner, cur);
+      }
+
+      const actions = [];
+      const skipped = [];
+      for (let i = 0; i < maxMoves; i++) {
+        const ordered = [...byWorker.entries()].sort((a, b) => (b[1].assigned - a[1].assigned));
+        const donor = ordered[0];
+        const recipient = [...byWorker.entries()].sort((a, b) => (a[1].assigned - b[1].assigned))[0];
+        if (!donor || !recipient) break;
+        if (donor[0] === recipient[0]) break;
+        if ((donor[1].assigned - recipient[1].assigned) < 2) {
+          skipped.push({ reason: 'already_balanced' });
+          break;
+        }
+
+        const recipientWip = Number(recipient[1].in_progress || 0);
+        if (recipientWip >= 1) {
+          skipped.push({ reason: 'recipient_at_wip_cap', recipient: recipient[0] });
+          break;
+        }
+
+        const candidate = tasks.find((t) => t.owner === donor[0] && t.status === 'assigned');
+        if (!candidate) {
+          skipped.push({ reason: 'no_assigned_candidate', donor: donor[0] });
+          break;
+        }
+
+        const moved = await updateTask({ id: candidate.id, owner: recipient[0], status: 'assigned' });
+        byWorker.get(donor[0]).assigned = Math.max(0, Number(byWorker.get(donor[0]).assigned || 0) - 1);
+        byWorker.get(recipient[0]).assigned = Number(byWorker.get(recipient[0]).assigned || 0) + 1;
+
+        const action = { task_id: moved.id, from: donor[0], to: recipient[0], status: 'assigned' };
+        actions.push(action);
+        await addEvent({ type: 'load_balance_action', message: `${moved.id} reassigned ${donor[0]} -> ${recipient[0]}`, taskId: moved.id, actor: 'load-balancer' });
+      }
+
+      return send(res, 200, { ok: true, run_id: runId, actions_count: actions.length, actions, skipped_count: skipped.length, skipped });
+    }
+
     if (url.pathname === '/api/task/recovery-run' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       if (!canAccess(accessCtx.role, ['tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
