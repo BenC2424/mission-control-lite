@@ -23,6 +23,20 @@
       </div>
       <div class="actions">
         <span id="readonlyBadge" class="badge hidden">READ-ONLY</span>
+        <label class="muted">Role
+          <select id="roleMode">
+            <option value="ops">ops</option>
+            <option value="worker">worker</option>
+            <option value="ultron">ultron</option>
+          </select>
+        </label>
+        <label id="workerAgentWrap" class="muted">Worker
+          <select id="workerAgentMode">
+            <option value="codi">codi</option>
+            <option value="scout">scout</option>
+          </select>
+        </label>
+        <button id="claimNextBtn">Claim Next</button>
         <button id="newTaskBtn">+ New Task</button>
         <button id="refreshBtn">Refresh</button>
         <button id="standupBtn">Generate Standup</button>

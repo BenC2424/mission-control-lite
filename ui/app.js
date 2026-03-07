@@ -15,6 +15,8 @@ let kpiDashboard = null;
 let selectedId = null;
 let draggedTaskId = null;
 let refreshInFlight = false;
+let roleMode = localStorage.getItem('mcl.roleMode') || 'ops';
+let workerAgentMode = localStorage.getItem('mcl.workerAgentMode') || 'codi';
 
 const filters = { owner: 'all', status: 'all', priority: 'all', search: '', showArchived: false };
 let feedType = 'all';
@@ -63,8 +65,18 @@ function clearError() {
   el.classList.remove('ok', 'info', 'error');
 }
 
+function authHeaders() {
+  const roleHeader = roleMode === 'ops' ? 'tenant_ops' : roleMode === 'ultron' ? 'tenant_admin' : 'tenant_user';
+  return {
+    'Content-Type': 'application/json',
+    'x-auth-role': roleHeader,
+    'x-auth-tenant-id': 'internal',
+    'x-auth-user-id': roleMode === 'worker' ? workerAgentMode : roleMode
+  };
+}
+
 async function api(path, opts = {}) {
-  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const r = await fetch(path, { headers: { ...authHeaders(), ...(opts.headers || {}) }, ...opts });
   if (!r.ok) throw new Error(`${path} failed: ${r.status}`);
   return r.json();
 }
@@ -213,10 +225,50 @@ function renderMode() {
   if (readOnly) badge.classList.remove('hidden');
   else badge.classList.add('hidden');
 
-  ['newTaskBtn','saveTask','assignTask','runOrchestra','deleteTask','saveNote','createTask','standupBtn','archiveDoneBtn','importBtn','wakeCodiBtn','wakeScoutBtn'].forEach((id) => {
+  const isOps = roleMode === 'ops';
+  const isWorker = roleMode === 'worker';
+  const isUltron = roleMode === 'ultron';
+
+  const show = (id, visible) => {
+    const el = $(id);
+    if (!el) return;
+    el.classList.toggle('hidden', !visible);
+  };
+
+  show('workerAgentWrap', isWorker);
+  show('claimNextBtn', isWorker);
+  show('newTaskBtn', isOps);
+  show('archiveDoneBtn', isOps);
+  show('wakeCodiBtn', isOps);
+  show('wakeScoutBtn', isOps);
+  show('assignTask', isOps);
+  show('runOrchestra', isOps);
+  show('deleteTask', isOps);
+  show('importBtn', isOps);
+
+  ['saveTask','saveNote','standupBtn','exportBtn','refreshBtn'].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = readOnly;
   });
+
+  if (!readOnly && selectedId) {
+    const statusEl = $('d-status');
+    if (statusEl) {
+      const allowed = isOps
+        ? ['inbox','assigned','in_progress','review','blocked','done','archived']
+        : isWorker
+          ? ['assigned','in_progress','review','blocked']
+          : ['review','done','assigned','blocked'];
+      [...statusEl.options].forEach((opt) => { opt.disabled = !allowed.includes(opt.value); });
+    }
+
+    const ownerEl = $('d-owner');
+    if (ownerEl) {
+      ownerEl.disabled = !isOps;
+      if (isWorker) ownerEl.value = workerAgentMode;
+      if (isUltron) ownerEl.value = 'ultron';
+    }
+  }
 }
 
 function renderOrchestraTemplates() {
@@ -314,6 +366,7 @@ function openDrawer(id) {
   $('d-activity').innerHTML = events.length
     ? events.map((e) => `<div class="note"><div class="muted">${e.at} • ${e.type} • ${e.actor || 'system'}</div>${e.message}</div>`).join('')
     : '<div class="muted">No activity yet.</div>';
+  renderMode();
 }
 
 async function refresh() {
@@ -381,6 +434,18 @@ $('filterSearch').oninput = (e) => { filters.search = e.target.value; renderBoar
 $('showArchived').onchange = (e) => { filters.showArchived = Boolean(e.target.checked); renderBoard(); renderMetrics(); };
 $('feedType').onchange = (e) => { feedType = e.target.value; renderFeed(); };
 $('feedLimit').onchange = (e) => { feedLimit = Number(e.target.value || 25); renderFeed(); };
+$('roleMode').onchange = async (e) => {
+  roleMode = e.target.value;
+  localStorage.setItem('mcl.roleMode', roleMode);
+  renderMode();
+  await refresh();
+};
+$('workerAgentMode').onchange = async (e) => {
+  workerAgentMode = e.target.value;
+  localStorage.setItem('mcl.workerAgentMode', workerAgentMode);
+  renderMode();
+  await refresh();
+};
 
 $('newTaskBtn').onclick = () => { if (!readOnly) $('createModal').classList.remove('hidden'); };
 $('closeCreate').onclick = () => $('createModal').classList.add('hidden');
@@ -547,6 +612,17 @@ $('wakeScoutBtn').onclick = async () => {
     showError(`Wake Scout failed: ${e.message}`);
   }
 };
+$('claimNextBtn').onclick = async () => {
+  try {
+    if (roleMode !== 'worker') return;
+    showInfo(`Claiming next for ${workerAgentMode}...`);
+    const out = await api('/api/task/claim-next', { method: 'POST', body: JSON.stringify({ agentId: workerAgentMode, actor: `ui.${workerAgentMode}` }) });
+    await refresh();
+    showOk(out.task ? `${workerAgentMode} claimed ${out.task.id}.` : `No claimable task for ${workerAgentMode}.`);
+  } catch (e) {
+    showError(`Claim failed: ${e.message}`);
+  }
+};
 $('importFile').onchange = async (e) => {
   try {
     const file = e.target.files?.[0];
@@ -585,6 +661,18 @@ document.addEventListener('keydown', async (e) => {
   if (e.key.toLowerCase() === 'r') await refresh();
   if (e.key.toLowerCase() === 'g') $('standupBtn').click();
 });
+
+{
+  const qp = new URLSearchParams(window.location.search);
+  const qr = qp.get('role');
+  const qa = qp.get('agent');
+  if (qr && ['ops','worker','ultron'].includes(qr)) roleMode = qr;
+  if (qa && ['codi','scout'].includes(qa)) workerAgentMode = qa;
+  const roleSel = $('roleMode');
+  const workerSel = $('workerAgentMode');
+  if (roleSel) roleSel.value = roleMode;
+  if (workerSel) workerSel.value = workerAgentMode;
+}
 
 refresh();
 setInterval(refresh, 15000);
