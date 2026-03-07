@@ -705,6 +705,75 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, run_id: runId, actions_count: actions.length, actions, skipped_count: skipped.length, skipped });
     }
 
+    if (url.pathname === '/api/contract/scale-workers-run' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, ['tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
+
+      const runId = `scaleplan-${Date.now()}`;
+      const body = await parseBody(req);
+      const capability = String(body.capability || 'codi').trim().toLowerCase();
+      if (capability !== 'codi') return send(res, 400, { error: 'unsupported_capability', supported: ['codi'] });
+
+      const [tasks, tenantAgents, tenantPlan] = await Promise.all([
+        listTasks(),
+        listTenantAgents(),
+        getTenantPlan(accessCtx.tenantId)
+      ]);
+
+      const planKey = tenantPlan?.planKey || 'starter';
+      const maxTempByPlan = planKey === 'enterprise' ? 2 : planKey === 'professional' ? 1 : 0;
+
+      const codiLike = tenantAgents.filter((a) => a.agentId === 'codi' || a.agentId.startsWith('codi-temp-')).map((a) => a.agentId);
+      const primaryWorkers = codiLike.filter((id) => id === 'codi');
+      const tempWorkers = codiLike.filter((id) => id.startsWith('codi-temp-'));
+
+      const workerStats = new Map();
+      for (const id of codiLike) workerStats.set(id, { assigned: 0, in_progress: 0 });
+      for (const t of tasks) {
+        if (!workerStats.has(t.owner)) continue;
+        const cur = workerStats.get(t.owner);
+        if (t.status === 'assigned') cur.assigned += 1;
+        if (t.status === 'in_progress') cur.in_progress += 1;
+      }
+
+      const assignedForCapability = [...workerStats.values()].reduce((s, v) => s + Number(v.assigned || 0), 0);
+      const idleWorkers = [...workerStats.values()].filter((v) => Number(v.in_progress || 0) === 0).length;
+      const saturatedWorkers = [...workerStats.values()].filter((v) => Number(v.in_progress || 0) >= 1).length;
+      const activeWorkerCapacity = Math.max(1, codiLike.length);
+      const capacityRemaining = Math.max(0, maxTempByPlan - tempWorkers.length);
+
+      const reasons = [];
+      if (maxTempByPlan <= 0) reasons.push('plan_disallows_temp_workers');
+      if (capacityRemaining <= 0) reasons.push('temp_worker_cap_reached');
+      if (!(assignedForCapability >= 4)) reasons.push('assigned_backlog_below_threshold');
+      if (!(idleWorkers === 0)) reasons.push('idle_worker_available');
+      if (!(saturatedWorkers >= 1)) reasons.push('no_saturated_worker');
+      if (!(assignedForCapability > activeWorkerCapacity)) reasons.push('capacity_not_exceeded');
+
+      const wouldScaleUp = reasons.length === 0;
+
+      return send(res, 200, {
+        ok: true,
+        run_id: runId,
+        planner_only: true,
+        capability,
+        plan_key: planKey,
+        limits: { max_temp_workers: maxTempByPlan, capacity_remaining: capacityRemaining },
+        current: {
+          primary_workers: primaryWorkers.length,
+          temp_workers: tempWorkers.length,
+          active_workers: codiLike.length,
+          active_worker_capacity: activeWorkerCapacity,
+          assigned_for_capability: assignedForCapability,
+          idle_workers_for_capability: idleWorkers,
+          saturated_workers_for_capability: saturatedWorkers
+        },
+        would_scale_up: wouldScaleUp,
+        recommendation: wouldScaleUp ? 'scale_up_candidate' : 'no_scale',
+        reasons
+      });
+    }
+
     if (url.pathname === '/api/task/recovery-run' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       if (!canAccess(accessCtx.role, ['tenant_ops'])) return send(res, 403, { error: 'forbidden_role' });
