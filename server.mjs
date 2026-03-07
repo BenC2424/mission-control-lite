@@ -712,6 +712,7 @@ export const server = http.createServer(async (req, res) => {
       const runId = `scaleplan-${Date.now()}`;
       const body = await parseBody(req);
       const capability = String(body.capability || 'codi').trim().toLowerCase();
+      const apply = Boolean(body.apply);
       if (capability !== 'codi') return send(res, 400, { error: 'unsupported_capability', supported: ['codi'] });
 
       const [tasks, tenantAgents, tenantPlan] = await Promise.all([
@@ -752,10 +753,28 @@ export const server = http.createServer(async (req, res) => {
 
       const wouldScaleUp = reasons.length === 0;
 
+      let scaleUp = { attempted: false, performed: false, worker: null, reason: null };
+      if (apply) {
+        scaleUp.attempted = true;
+        const tempWorkerId = 'codi-temp-1';
+        const exists = tempWorkers.includes(tempWorkerId);
+        if (exists) {
+          scaleUp.reason = 'temp_worker_already_exists';
+        } else if (!wouldScaleUp) {
+          scaleUp.reason = 'planner_conditions_not_met';
+        } else {
+          await addTenantAgent({ tenantId: accessCtx.tenantId, agentId: tempWorkerId, role: 'agent', enabled: 1, displayName: 'Codi Temp 1', capabilitiesProfile: 'codi-temp' });
+          await setTenantAgentEnabled({ tenantId: accessCtx.tenantId, agentId: tempWorkerId, enabled: 1 });
+          await addEvent({ type: 'worker_scale_up', message: `${tempWorkerId} activated (assigned_backlog_exceeds_capacity)`, actor: 'scale-controller' });
+          scaleUp = { attempted: true, performed: true, worker: tempWorkerId, reason: 'assigned_backlog_exceeds_capacity' };
+        }
+      }
+
       return send(res, 200, {
         ok: true,
         run_id: runId,
-        planner_only: true,
+        planner_only: !apply,
+        apply,
         capability,
         plan_key: planKey,
         limits: { max_temp_workers: maxTempByPlan, capacity_remaining: capacityRemaining },
@@ -770,7 +789,8 @@ export const server = http.createServer(async (req, res) => {
         },
         would_scale_up: wouldScaleUp,
         recommendation: wouldScaleUp ? 'scale_up_candidate' : 'no_scale',
-        reasons
+        reasons,
+        scale_up: scaleUp
       });
     }
 
