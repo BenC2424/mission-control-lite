@@ -36,7 +36,11 @@ import {
   getTeamTemplate,
   createOnboardingRecord,
   getOnboardingRecord,
-  updateOnboardingStatus
+  updateOnboardingStatus,
+  listServicePlans,
+  getServicePlan,
+  setTenantPlan,
+  getTenantPlan
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -532,16 +536,26 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, recovered_count: recovered.length, recovered, skipped_count: skipped.length, skipped });
     }
 
+    if (url.pathname === '/api/plans' && req.method === 'GET') {
+      const plans = await listServicePlans();
+      const tenantPlan = await getTenantPlan(accessCtx.tenantId);
+      return send(res, 200, { ok: true, plans: plans.map((p) => ({ ...p, features: JSON.parse(p.featuresJson || '{}') })), tenantPlan: tenantPlan ? { ...tenantPlan, limits: JSON.parse(tenantPlan.limitsJson || '{}') } : null });
+    }
+
     if (url.pathname === '/api/onboarding/request' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       if (!canAccess(accessCtx.role, [])) return send(res, 403, { error: 'forbidden_role' });
       const body = await parseBody(req);
       const tenantId = String(body.tenantId || '').trim();
       if (!tenantId || !/^[a-z0-9_-]{2,64}$/i.test(tenantId)) return send(res, 400, { error: 'validation_failed', details: ['valid tenantId required'] });
+      const requestedPlan = body.requestedPlan || 'starter';
+      const plan = await getServicePlan(requestedPlan);
+      if (!plan) return send(res, 400, { error: 'invalid_plan' });
+
       const rec = await createOnboardingRecord({
         tenantId,
-        requestedPlan: body.requestedPlan || 'standard',
-        requestedTeamType: body.requestedTeamType || 'general_team',
+        requestedPlan,
+        requestedTeamType: body.requestedTeamType || (plan.defaultTeamTemplate || 'general_team'),
         createdBy: body.createdBy || accessCtx.userId || 'platform_admin',
         notes: body.notes || ''
       });
@@ -559,18 +573,32 @@ export const server = http.createServer(async (req, res) => {
       if (!ob) return send(res, 404, { error: 'onboarding_not_found' });
 
       await updateOnboardingStatus({ id, status: 'provisioning' });
-      const tpl = await getTeamTemplate(ob.requestedTeamType || 'general_team');
+      const plan = await getServicePlan(ob.requestedPlan || 'starter');
+      if (!plan) {
+        await updateOnboardingStatus({ id, status: 'failed', notes: 'invalid requested plan' });
+        return send(res, 400, { error: 'invalid_plan' });
+      }
+
+      const tpl = await getTeamTemplate(ob.requestedTeamType || plan.defaultTeamTemplate || 'general_team');
       const template = tpl ? JSON.parse(tpl.templateJson || '{}') : {
         agents: ['ultron', 'ops', 'codi', 'scout'].map((agentId) => ({ agentId, role: 'agent', enabled: 1 }))
       };
-      const agents = Array.isArray(template.agents) ? template.agents : [];
-      for (const a of agents) {
+      const seeded = (Array.isArray(template.agents) ? template.agents : []).slice(0, Number(plan.maxAgents || 4));
+      for (const a of seeded) {
         await addTenantAgent({ tenantId: ob.tenantId, agentId: a.agentId, role: a.role || 'agent', enabled: a.enabled ?? 1 });
       }
 
+      await setTenantPlan({
+        tenantId: ob.tenantId,
+        planKey: plan.planKey,
+        status: 'active',
+        activatedAt: now(),
+        limits: { max_agents: plan.maxAgents, max_wip: plan.maxWip, max_tasks: plan.maxTasks }
+      });
+
       await updateOnboardingStatus({ id, status: 'ready_for_validation' });
-      await addEvent({ type: 'onboarding_provisioned', message: `${id} tenant=${ob.tenantId} agents=${agents.length}`, actor: 'platform_admin' });
-      return send(res, 200, { ok: true, onboardingId: id, tenantId: ob.tenantId, status: 'ready_for_validation', seededAgents: agents.map((a) => a.agentId) });
+      await addEvent({ type: 'onboarding_provisioned', message: `${id} tenant=${ob.tenantId} plan=${plan.planKey} agents=${seeded.length}`, actor: 'platform_admin' });
+      return send(res, 200, { ok: true, onboardingId: id, tenantId: ob.tenantId, status: 'ready_for_validation', planKey: plan.planKey, seededAgents: seeded.map((a) => a.agentId) });
     }
 
     if (url.pathname === '/api/onboarding/validate' && req.method === 'POST') {
@@ -583,9 +611,11 @@ export const server = http.createServer(async (req, res) => {
       if (!ob) return send(res, 404, { error: 'onboarding_not_found' });
 
       const team = await listTenantAgents(ob.tenantId);
+      const tenantPlan = await getTenantPlan(ob.tenantId);
       const checks = {
         tenant_id_valid: /^[a-z0-9_-]{2,64}$/i.test(ob.tenantId),
         team_seeded: team.length > 0,
+        tenant_plan_assigned: !!tenantPlan,
         report_write_path_ready: true,
         canary_ready: true
       };
@@ -684,12 +714,16 @@ export const server = http.createServer(async (req, res) => {
       const targetStatus = patch.status || existing.status;
       const targetOwner = patch.owner || existing.owner;
 
+      const tenantPlan = await getTenantPlan(accessCtx.tenantId);
+      const planLimits = tenantPlan ? JSON.parse(tenantPlan.limitsJson || '{}') : {};
+      const maxWipGlobal = Number(planLimits.max_wip || 4);
+
       // Hard WIP guardrails (control-plane policy)
       if (targetStatus === 'in_progress' && existing.status !== 'in_progress') {
         const globalInProgress = await countTasksByStatus('in_progress', patch.id);
-        if (globalInProgress >= 4) {
-          await logEvent('task_transition_denied', `${patch.id} denied -> in_progress (global_wip_cap reached: ${globalInProgress}/4)`, patch.id, patch.actor || 'ui');
-          return send(res, 409, { error: 'wip_limit_exceeded', scope: 'global_in_progress', limit: 4, current: globalInProgress });
+        if (globalInProgress >= maxWipGlobal) {
+          await logEvent('task_transition_denied', `${patch.id} denied -> in_progress (global_wip_cap reached: ${globalInProgress}/${maxWipGlobal})`, patch.id, patch.actor || 'ui');
+          return send(res, 409, { error: 'wip_limit_exceeded', scope: 'global_in_progress', limit: maxWipGlobal, current: globalInProgress });
         }
         const ownerInProgress = await countTasksByOwnerAndStatus(targetOwner, 'in_progress', patch.id);
         if (ownerInProgress >= 1) {
