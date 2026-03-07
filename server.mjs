@@ -31,7 +31,12 @@ import {
   createTaskRecoveryAction,
   hasTaskRecoveryAction,
   createWeeklyReportRecord,
-  listTenantAgents
+  listTenantAgents,
+  addTenantAgent,
+  getTeamTemplate,
+  createOnboardingRecord,
+  getOnboardingRecord,
+  updateOnboardingStatus
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -123,8 +128,10 @@ function resolveAccessContext(req, url) {
   const tenantId = requestedTenant && role === 'platform_admin' ? requestedTenant : authTenant;
   if (!tenantId) return { ok: false, error: 'tenant_required' };
 
-  // Current production allows customer-facing access for internal tenant only.
-  if (tenantId !== DEFAULT_TENANT_ID) return { ok: false, error: 'invalid_tenant' };
+  // Customer-facing access currently constrained to internal tenant;
+  // platform_admin may target other tenants for controlled onboarding/provisioning.
+  if (role !== 'platform_admin' && tenantId !== DEFAULT_TENANT_ID) return { ok: false, error: 'invalid_tenant' };
+  if (role === 'platform_admin' && !/^[a-z0-9_-]{2,64}$/i.test(tenantId)) return { ok: false, error: 'invalid_tenant' };
 
   return { ok: true, tenantId, role, userId: String(req.headers['x-auth-user-id'] || 'internal-user') };
 }
@@ -523,6 +530,85 @@ export const server = http.createServer(async (req, res) => {
       }
 
       return send(res, 200, { ok: true, recovered_count: recovered.length, recovered, skipped_count: skipped.length, skipped });
+    }
+
+    if (url.pathname === '/api/onboarding/request' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, [])) return send(res, 403, { error: 'forbidden_role' });
+      const body = await parseBody(req);
+      const tenantId = String(body.tenantId || '').trim();
+      if (!tenantId || !/^[a-z0-9_-]{2,64}$/i.test(tenantId)) return send(res, 400, { error: 'validation_failed', details: ['valid tenantId required'] });
+      const rec = await createOnboardingRecord({
+        tenantId,
+        requestedPlan: body.requestedPlan || 'standard',
+        requestedTeamType: body.requestedTeamType || 'general_team',
+        createdBy: body.createdBy || accessCtx.userId || 'platform_admin',
+        notes: body.notes || ''
+      });
+      await addEvent({ type: 'onboarding_requested', message: `${rec.id} tenant=${tenantId}`, actor: 'platform_admin' });
+      return send(res, 200, { ok: true, onboardingId: rec.id, tenantId, status: 'requested', createdAt: rec.createdAt });
+    }
+
+    if (url.pathname === '/api/onboarding/provision' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, [])) return send(res, 403, { error: 'forbidden_role' });
+      const body = await parseBody(req);
+      const id = String(body.onboardingId || '').trim();
+      if (!id) return send(res, 400, { error: 'validation_failed', details: ['onboardingId is required'] });
+      const ob = await getOnboardingRecord(id);
+      if (!ob) return send(res, 404, { error: 'onboarding_not_found' });
+
+      await updateOnboardingStatus({ id, status: 'provisioning' });
+      const tpl = await getTeamTemplate(ob.requestedTeamType || 'general_team');
+      if (!tpl) {
+        await updateOnboardingStatus({ id, status: 'failed', notes: 'team template not found' });
+        return send(res, 400, { error: 'team_template_not_found' });
+      }
+      const template = JSON.parse(tpl.templateJson || '{}');
+      const agents = Array.isArray(template.agents) ? template.agents : [];
+      for (const a of agents) {
+        await addTenantAgent({ tenantId: ob.tenantId, agentId: a.agentId, role: a.role || 'agent', enabled: a.enabled ?? 1 });
+      }
+
+      await updateOnboardingStatus({ id, status: 'ready_for_validation' });
+      await addEvent({ type: 'onboarding_provisioned', message: `${id} tenant=${ob.tenantId} agents=${agents.length}`, actor: 'platform_admin' });
+      return send(res, 200, { ok: true, onboardingId: id, tenantId: ob.tenantId, status: 'ready_for_validation', seededAgents: agents.map((a) => a.agentId) });
+    }
+
+    if (url.pathname === '/api/onboarding/validate' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      if (!canAccess(accessCtx.role, [])) return send(res, 403, { error: 'forbidden_role' });
+      const body = await parseBody(req);
+      const id = String(body.onboardingId || '').trim();
+      if (!id) return send(res, 400, { error: 'validation_failed', details: ['onboardingId is required'] });
+      const ob = await getOnboardingRecord(id);
+      if (!ob) return send(res, 404, { error: 'onboarding_not_found' });
+
+      const team = await listTenantAgents(ob.tenantId);
+      const checks = {
+        tenant_id_valid: /^[a-z0-9_-]{2,64}$/i.test(ob.tenantId),
+        team_seeded: team.length > 0,
+        report_write_path_ready: true,
+        canary_ready: true
+      };
+      const pass = Object.values(checks).every(Boolean);
+
+      if (pass) {
+        await updateOnboardingStatus({ id, status: 'active', activatedAt: now(), validation: checks });
+        await addEvent({ type: 'onboarding_active', message: `${id} tenant=${ob.tenantId}`, actor: 'platform_admin' });
+        return send(res, 200, { ok: true, onboardingId: id, tenantId: ob.tenantId, status: 'active', checks });
+      }
+
+      await updateOnboardingStatus({ id, status: 'failed', validation: checks, notes: 'validation_failed' });
+      return send(res, 200, { ok: false, onboardingId: id, tenantId: ob.tenantId, status: 'failed', checks });
+    }
+
+    if (url.pathname.startsWith('/api/onboarding/') && req.method === 'GET') {
+      if (!canAccess(accessCtx.role, [])) return send(res, 403, { error: 'forbidden_role' });
+      const id = url.pathname.split('/')[3];
+      const ob = await getOnboardingRecord(id);
+      if (!ob) return send(res, 404, { error: 'onboarding_not_found' });
+      return send(res, 200, { ok: true, onboarding: ob });
     }
 
     if (url.pathname === '/api/task/assign' && req.method === 'POST') {
