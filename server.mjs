@@ -150,7 +150,8 @@ function canAccess(role, allowed = []) {
 
 async function assertTenantLifecycleWriteAllowed(tenantId) {
   const plan = await getTenantPlan(tenantId);
-  const status = plan?.status || 'active';
+  const sub = await getSubscriptionByTenant(tenantId);
+  const status = plan?.status || sub?.status || 'active';
   if (status === 'suspended' || status === 'canceled') {
     return { ok: false, error: 'tenant_lifecycle_blocked', status };
   }
