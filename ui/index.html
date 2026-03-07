@@ -19,6 +19,7 @@
         <div class="metric"><span id="metric-done">0</span><label>Done</label></div>
         <div class="metric"><span id="metric-stale">0</span><label>Stale >24h</label></div>
         <div class="metric"><span id="metric-escalations">0</span><label>Escalations</label></div>
+        <div class="metric" id="metric-flowratio-tile"><span id="metric-flowratio">n/a</span><label>Flow Ratio</label></div>
       </div>
       <div class="actions">
         <span id="readonlyBadge" class="badge hidden">READ-ONLY</span>
@@ -35,6 +36,7 @@
     </header>
 
     <div id="flash" class="flash hidden"></div>
+    <div id="refreshTiming" class="muted" style="margin:6px 14px 0;">refresh: idle</div>
     <div class="filters panel">
       <label>Owner
         <select id="filterOwner">

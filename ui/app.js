@@ -8,11 +8,13 @@ let cachedAgents = [];
 let cachedEvents = [];
 let readOnly = false;
 let metrics = null;
+let boardHealth = null;
 let escalations = [];
 let orchestraTemplates = [];
 let kpiDashboard = null;
 let selectedId = null;
 let draggedTaskId = null;
+let refreshInFlight = false;
 
 const filters = { owner: 'all', status: 'all', priority: 'all', search: '', showArchived: false };
 let feedType = 'all';
@@ -67,41 +69,56 @@ async function api(path, opts = {}) {
   return r.json();
 }
 
-async function loadData() {
-  // core endpoints (must have)
-  const [t, a, ev, cfg] = await Promise.all([
-    api('/api/tasks'),
-    api('/api/agents'),
-    api('/api/activity'),
-    api('/api/config')
-  ]);
+async function apiTimed(path, opts = {}) {
+  const started = performance.now();
+  const data = await api(path, opts);
+  return { data, ms: Math.round(performance.now() - started) };
+}
 
-  // optional endpoints (degrade gracefully if backend is older/mid-restart)
-  const [mRes, escRes, orchRes, kpiRes] = await Promise.allSettled([
-    api('/api/metrics'),
-    api('/api/escalations'),
-    api('/api/orchestration/templates'),
-    api('/api/kpi/dashboard', {
+async function loadSummaryData() {
+  const out = await apiTimed('/api/autopilot/board-health');
+  boardHealth = out.data || null;
+  return { boardHealthMs: out.ms };
+}
+
+async function loadCoreData() {
+  const tasksP = apiTimed('/api/tasks');
+  const agentsP = apiTimed('/api/agents');
+  const activityP = apiTimed('/api/activity');
+  const configP = apiTimed('/api/config');
+
+  const [t, a, ev, cfg] = await Promise.all([tasksP, agentsP, activityP, configP]);
+
+  const optional = await Promise.allSettled([
+    apiTimed('/api/metrics'),
+    apiTimed('/api/escalations'),
+    apiTimed('/api/orchestration/templates'),
+    apiTimed('/api/kpi/dashboard', {
       method: 'POST',
-      body: JSON.stringify({
-        current: {},
-        baseline: {}
-      })
+      body: JSON.stringify({ current: {}, baseline: {} })
     })
   ]);
 
-  cachedTasks = t.tasks ?? [];
-  cachedAgents = a.agents ?? [];
-  cachedEvents = ev.events ?? [];
-  readOnly = Boolean(cfg.readOnly);
+  cachedTasks = t.data.tasks ?? [];
+  cachedAgents = a.data.agents ?? [];
+  cachedEvents = ev.data.events ?? [];
+  readOnly = Boolean(cfg.data.readOnly);
 
-  metrics = mRes.status === 'fulfilled'
-    ? mRes.value
+  metrics = optional[0].status === 'fulfilled'
+    ? optional[0].value.data
     : { tasks: { done: 0 }, staleOpen: 0, escalationCount: 0, latestHeartbeats: [], assignments: {} };
 
-  escalations = escRes.status === 'fulfilled' ? (escRes.value.items || []) : [];
-  orchestraTemplates = orchRes.status === 'fulfilled' ? (orchRes.value.templates || []) : [];
-  kpiDashboard = kpiRes.status === 'fulfilled' ? (kpiRes.value.dashboard || null) : null;
+  escalations = optional[1].status === 'fulfilled' ? (optional[1].value.data.items || []) : [];
+  orchestraTemplates = optional[2].status === 'fulfilled' ? (optional[2].value.data.templates || []) : [];
+  kpiDashboard = optional[3].status === 'fulfilled' ? (optional[3].value.data.dashboard || null) : null;
+
+  return {
+    tasksMs: t.ms,
+    agentsMs: a.ms,
+    activityMs: ev.ms,
+    configMs: cfg.ms,
+    coreMs: Math.max(t.ms, a.ms, ev.ms, cfg.ms)
+  };
 }
 
 function filteredTasks() {
@@ -130,11 +147,16 @@ function renderAgents() {
 
 function renderBoard() {
   const tasks = filteredTasks();
-  const kanban = $('kanban'); kanban.innerHTML = '';
+  const kanban = $('kanban');
+  kanban.innerHTML = '';
   const visibleStatuses = filters.showArchived ? statuses : statuses.filter((s) => s !== 'archived');
+
+  const columns = new Map();
   for (const status of visibleStatuses) {
-    const col = document.createElement('div'); col.className = 'col';
+    const col = document.createElement('div');
+    col.className = 'col';
     col.dataset.status = status;
+    col.innerHTML = `<h3>${statusTitles[status]} (…)</h3><div class="muted">Loading…</div>`;
     col.addEventListener('dragover', (e) => e.preventDefault());
     col.addEventListener('drop', async (e) => {
       e.preventDefault();
@@ -144,19 +166,34 @@ function renderBoard() {
       draggedTaskId = null;
       await refresh();
     });
-
-    const scoped = tasks.filter((t) => t.status === status);
-    col.innerHTML = `<h3>${statusTitles[status]} (${scoped.length})</h3>`;
-    scoped.forEach((t) => {
-      const card = document.createElement('div'); card.className = 'card';
-      card.draggable = true;
-      card.addEventListener('dragstart', () => { draggedTaskId = t.id; });
-      card.innerHTML = `<div class="title">${t.title}</div><div class="meta">${t.id} • ${ownerChip(t.owner)} • ${t.priority}</div>`;
-      card.onclick = () => openDrawer(t.id);
-      col.appendChild(card);
-    });
     kanban.appendChild(col);
+    columns.set(status, col);
   }
+
+  // progressive render to avoid UI freeze on large boards
+  visibleStatuses.forEach((status, idx) => {
+    setTimeout(() => {
+      const col = columns.get(status);
+      if (!col) return;
+      const scoped = tasks.filter((t) => t.status === status);
+      col.innerHTML = `<h3>${statusTitles[status]} (${scoped.length})</h3>`;
+      scoped.slice(0, 100).forEach((t) => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.draggable = true;
+        card.addEventListener('dragstart', () => { draggedTaskId = t.id; });
+        card.innerHTML = `<div class="title">${t.title}</div><div class="meta">${t.id} • ${ownerChip(t.owner)} • ${t.priority}</div>`;
+        card.onclick = () => openDrawer(t.id);
+        col.appendChild(card);
+      });
+      if (scoped.length > 100) {
+        const more = document.createElement('div');
+        more.className = 'muted';
+        more.textContent = `+${scoped.length - 100} more`; 
+        col.appendChild(more);
+      }
+    }, idx * 0);
+  });
 }
 
 function renderFeed() {
@@ -228,12 +265,24 @@ function renderKpiDashboard() {
 
 function renderMetrics() {
   const tasks = filteredTasks();
+  const byStatus = boardHealth?.by_status || {};
+  const flow = boardHealth?.flow_ratio || null;
+
   $('metric-agents').textContent = String(cachedAgents.length);
   $('metric-tasks').textContent = String(tasks.length);
-  $('metric-inprogress').textContent = String(tasks.filter((t) => t.status === 'in_progress').length);
-  $('metric-done').textContent = String(metrics?.tasks?.done ?? 0);
+  $('metric-inprogress').textContent = String(byStatus.in_progress ?? tasks.filter((t) => t.status === 'in_progress').length);
+  $('metric-done').textContent = String(byStatus.done ?? metrics?.tasks?.done ?? 0);
   $('metric-stale').textContent = String(metrics?.staleOpen ?? 0);
   $('metric-escalations').textContent = String(metrics?.escalationCount ?? 0);
+
+  const flowValueEl = $('metric-flowratio');
+  const flowTile = $('metric-flowratio-tile');
+  if (flowValueEl && flowTile && flow) {
+    flowValueEl.textContent = String(flow.value ?? 'n/a');
+    flowTile.classList.remove('flow-green', 'flow-yellow', 'flow-red');
+    flowTile.classList.add(flow.color === 'green' ? 'flow-green' : flow.color === 'yellow' ? 'flow-yellow' : 'flow-red');
+    flowTile.title = `completed_24h=${flow.tasks_completed_24h ?? 0}, average_wip=${flow.average_wip ?? 0}`;
+  }
 
   const hb = metrics?.latestHeartbeats?.[0];
   $('heartbeatStatus').textContent = hb
@@ -268,10 +317,29 @@ function openDrawer(id) {
 }
 
 async function refresh() {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  const refreshBtn = $('refreshBtn');
+  const started = performance.now();
+  const prevLabel = refreshBtn?.textContent;
+  if (refreshBtn) { refreshBtn.textContent = 'Refreshing…'; refreshBtn.disabled = true; }
+
   try {
-    await loadData();
+    // Stage A: fast summary/header first
+    const summaryTiming = await loadSummaryData();
+    renderMetrics();
     clearError();
-    renderAgents(); renderBoard(); renderFeed(); renderMetrics(); renderEscalations(); renderKpiDashboard(); renderOrchestraTemplates(); renderMode();
+
+    // Stage B: board + panels
+    const coreTiming = await loadCoreData();
+    renderAgents();
+    renderBoard();
+    renderFeed();
+    renderMetrics();
+    renderEscalations();
+    renderKpiDashboard();
+    renderOrchestraTemplates();
+    renderMode();
 
     if (selectedId) {
       const exists = cachedTasks.some((t) => t.id === selectedId);
@@ -281,8 +349,17 @@ async function refresh() {
         $('drawer').classList.add('hidden');
       }
     }
+
+    const totalMs = Math.round(performance.now() - started);
+    const timing = `refresh: total=${totalMs}ms board_health=${summaryTiming.boardHealthMs}ms tasks=${coreTiming.tasksMs}ms activity=${coreTiming.activityMs}ms`;
+    console.info(timing);
+    const timingEl = $('refreshTiming');
+    if (timingEl) timingEl.textContent = timing;
   } catch (e) {
     showError(`Refresh failed: ${e.message}`);
+  } finally {
+    refreshInFlight = false;
+    if (refreshBtn) { refreshBtn.textContent = prevLabel || 'Refresh'; refreshBtn.disabled = false; }
   }
 }
 
