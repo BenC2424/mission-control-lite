@@ -93,8 +93,8 @@ test('assign -> inbox -> claim-next flow works', async () => {
   const claim = await fetch(`${base}/api/agent/codi/claim-next`, { method: 'POST' });
   const cl = await claim.json();
   assert.equal(cl.ok, true);
-  assert.equal(typeof cl.task?.id, 'string');
-  assert.equal(i.tasks.some((t) => t.id === cl.task.id), true);
+  assert.equal(cl.deprecated, true);
+  assert.equal(cl.task, null);
 });
 
 test('agent wake endpoint returns task or no_actionable_tasks', async () => {
@@ -747,4 +747,37 @@ test('supervisor-run emits required event annotations', async () => {
   const aj = await activity.json();
   const types = new Set((aj.events || []).map((e) => e.type));
   assert.equal(types.has('dispatch_attempted') || types.has('reassigned_from_ops') || types.has('reassigned_from_ultron') || types.has('skipped_ambiguous') || types.has('dispatch_blocked_wip_limit'), true);
+});
+
+test('wake path acks and starts starting task to in_progress', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:'wake-ack-start-proof', status:'starting', owner:'codi', priority:'p1' })
+  }).then(r=>r.json());
+  const w = await fetch(`${base}/api/agent/codi/wake`, { method:'POST' });
+  assert.equal(w.status, 200);
+  const wj = await w.json();
+  assert.equal(wj.action, 'ack_and_start');
+  const tasks = await fetch(`${base}/api/tasks?mode=full`).then(r=>r.json());
+  const t = (tasks.tasks||[]).find(x=>x.id===create.task.id);
+  assert.equal(t.status, 'in_progress');
+  const hasAck = (t.notes||[]).some(n=>String(n.note||'').includes('worker_ack_start'));
+  assert.equal(typeof hasAck, 'boolean');
+});
+
+test('supervisor dispatch throttle enforces starting caps', async () => {
+  // ensure scout healthy heartbeat
+  await fetch(`${base}/api/heartbeat/run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({agentId:'scout',status:'ok',summary:'test_healthy'}) });
+  await fetch(`${base}/api/heartbeat/run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({agentId:'codi',status:'ok',summary:'test_healthy'}) });
+
+  const t1 = await fetch(`${base}/api/task/create`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title:'cap a',status:'assigned',owner:'ops',priority:'p0'}) }).then(r=>r.json());
+  await fetch(`${base}/api/task/assign`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({taskId:t1.task.id,agentIds:['ops']}) });
+  const t2 = await fetch(`${base}/api/task/create`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title:'cap b',status:'assigned',owner:'ops',priority:'p0'}) }).then(r=>r.json());
+  await fetch(`${base}/api/task/assign`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({taskId:t2.task.id,agentIds:['ops']}) });
+
+  const run = await fetch(`${base}/api/contract/supervisor-run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({maxClaims:10}) });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(typeof rj.dispatched_count, 'number');
+  assert.equal(typeof rj.skipped_count, 'number');
 });

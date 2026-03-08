@@ -290,20 +290,32 @@ export const server = http.createServer(async (req, res) => {
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/wake') && req.method === 'POST') {
       const agentId = url.pathname.split('/')[3];
       await markInboxSeen(agentId);
-      const task = await claimNext(agentId);
-      const summary = task ? `claimed ${task.id}` : 'no_actionable_tasks';
-      await recordHeartbeat(agentId, 'ok', summary);
-      if (task) await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
-      return send(res, 200, { ok: true, agentId, task, inboxCount: (await agentInbox(agentId)).length });
+      const tasks = await listTasks();
+      const startingTask = tasks
+        .filter((t) => t.owner === agentId && t.status === 'starting')
+        .sort((a, b) => new Date(a.updatedAt || a.createdAt) - new Date(b.updatedAt || b.createdAt))[0];
+
+      if (!startingTask) {
+        await recordHeartbeat(agentId, 'ok', 'no_actionable_tasks');
+        return send(res, 200, { ok: true, agentId, task: null, action: 'idle', inboxCount: (await agentInbox(agentId)).length });
+      }
+
+      const startedAt = now();
+      await recordTaskStartAck({ taskId: startingTask.id, agentId, startedAt, heartbeatAt: startedAt, noteAt: startedAt });
+      await addEvent({ type: 'task_start_ack', message: `${startingTask.id} ack by ${agentId} started_at=${startedAt}`, taskId: startingTask.id, actor: agentId });
+
+      const moved = await updateTask({ id: startingTask.id, status: 'in_progress', owner: agentId });
+      await addEvent({ type: 'task_started', message: `${startingTask.id} starting->in_progress by ${agentId}`, taskId: startingTask.id, actor: agentId });
+      await recordHeartbeat(agentId, 'ok', `started ${startingTask.id}`);
+
+      return send(res, 200, { ok: true, agentId, task: moved, action: 'ack_and_start', inboxCount: (await agentInbox(agentId)).length });
     }
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/claim-next') && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
       const agentId = url.pathname.split('/')[3];
-      const task = await claimNext(agentId);
-      if (!task) return send(res, 200, { ok: true, task: null });
-      await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
-      return send(res, 200, { ok: true, task });
+      await recordHeartbeat(agentId, 'ok', 'claim_next_deprecated_use_supervisor_dispatch');
+      return send(res, 200, { ok: true, task: null, deprecated: true, message: 'use /api/contract/supervisor-run dispatch path' });
     }
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/complete-task') && req.method === 'POST') {
@@ -1003,7 +1015,18 @@ export const server = http.createServer(async (req, res) => {
 
       const ownerInProgress = Object.create(null);
       for (const t of snapshot.filter((t) => t.status === 'in_progress')) ownerInProgress[t.owner] = (ownerInProgress[t.owner] || 0) + 1;
+      const ownerStarting = Object.create(null);
+      for (const t of snapshot.filter((t) => t.status === 'starting')) ownerStarting[t.owner] = (ownerStarting[t.owner] || 0) + 1;
       let globalInProgress = snapshot.filter((t) => t.status === 'in_progress').length;
+      let globalStarting = snapshot.filter((t) => t.status === 'starting').length;
+
+      const recentDispatchByOwner = Object.create(null);
+      const recentCutoff = Date.now() - 15 * 60 * 1000;
+      const recentEvents = (await listEvents(1000)).filter((e) => new Date(e.at).getTime() >= recentCutoff && ['dispatch_started','dispatch_attempted'].includes(e.type));
+      for (const e of recentEvents) {
+        const m = String(e.message || '').match(/for\s+(\w+)$/) || String(e.message || '').match(/owner=(\w+)/);
+        if (m) recentDispatchByOwner[m[1]] = (recentDispatchByOwner[m[1]] || 0) + 1;
+      }
 
       const reassigned = [];
       const skipped = [];
@@ -1015,17 +1038,36 @@ export const server = http.createServer(async (req, res) => {
 
       const chooseWorker = () => {
         const candidates = workers
-          .map((id) => ({ id, health: workerHealth(id), inProgress: Number(ownerInProgress[id] || 0), assigned: assigned.filter((t) => t.owner === id).length }))
-          .filter((w) => w.health !== 'unhealthy')
-          .sort((a, b) => a.inProgress - b.inProgress || a.assigned - b.assigned);
+          .map((id) => ({
+            id,
+            health: workerHealth(id),
+            inProgress: Number(ownerInProgress[id] || 0),
+            starting: Number(ownerStarting[id] || 0),
+            recentDispatch: Number(recentDispatchByOwner[id] || 0),
+            assigned: assigned.filter((t) => t.owner === id).length
+          }))
+          .filter((w) => w.health === 'healthy')
+          .sort((a, b) => (a.inProgress + a.starting) - (b.inProgress + b.starting) || a.recentDispatch - b.recentDispatch || a.assigned - b.assigned);
         return candidates[0]?.id || null;
       };
 
       const dispatchAttempt = async (task, actor) => {
         await addEvent({ type: 'dispatch_attempted', message: `${task.id} attempt assigned->starting owner=${task.owner}`, taskId: task.id, actor });
+
+        const health = workerHealth(task.owner);
+        if (health !== 'healthy') {
+          skipped.push({ task_id: task.id, reason: 'health_gate', owner: task.owner, health });
+          return false;
+        }
+
         if (globalInProgress >= maxWipGlobal) {
           await addEvent({ type: 'dispatch_blocked_wip_limit', message: `${task.id} blocked assigned->starting (global_in_progress ${globalInProgress}/${maxWipGlobal})`, taskId: task.id, actor });
           skipped.push({ task_id: task.id, reason: 'global_wip_cap_reached', current: globalInProgress, limit: maxWipGlobal });
+          return false;
+        }
+        if (globalStarting >= 3) {
+          await addEvent({ type: 'dispatch_blocked_wip_limit', message: `${task.id} blocked assigned->starting (global_starting ${globalStarting}/3)`, taskId: task.id, actor });
+          skipped.push({ task_id: task.id, reason: 'global_starting_cap_reached', current: globalStarting, limit: 3 });
           return false;
         }
         if (Number(ownerInProgress[task.owner] || 0) >= 1) {
@@ -1033,9 +1075,15 @@ export const server = http.createServer(async (req, res) => {
           skipped.push({ task_id: task.id, reason: 'owner_wip_cap_reached', owner: task.owner, current: ownerInProgress[task.owner], limit: 1 });
           return false;
         }
+        if (Number(ownerStarting[task.owner] || 0) >= 1) {
+          await addEvent({ type: 'dispatch_blocked_wip_limit', message: `${task.id} blocked assigned->starting (owner_starting ${task.owner} ${ownerStarting[task.owner]}/1)`, taskId: task.id, actor });
+          skipped.push({ task_id: task.id, reason: 'owner_starting_cap_reached', owner: task.owner, current: ownerStarting[task.owner], limit: 1 });
+          return false;
+        }
         const moved = await updateTask({ id: task.id, status: 'starting', owner: task.owner });
+        ownerStarting[task.owner] = Number(ownerStarting[task.owner] || 0) + 1;
+        globalStarting += 1;
         await addEvent({ type: 'dispatch_started', message: `${task.id} dispatched assigned->starting for ${task.owner}`, taskId: task.id, actor });
-        await recordHeartbeat(task.owner, 'ok', `dispatch_started ${task.id}`);
         await addEvent({ type: 'worker_wake_triggered', message: `${task.owner} wake triggered for ${task.id}`, taskId: task.id, actor });
         dispatchedCount += 1;
         return moved;
