@@ -13,7 +13,6 @@ let escalations = [];
 let orchestraTemplates = [];
 let kpiDashboard = null;
 let selectedId = null;
-let draggedTaskId = null;
 let refreshInFlight = false;
 let roleMode = localStorage.getItem('mcl.roleMode') || 'ops';
 let workerAgentMode = localStorage.getItem('mcl.workerAgentMode') || 'codi';
@@ -88,8 +87,14 @@ function authHeaders() {
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { ...authHeaders(), ...(opts.headers || {}) }, ...opts });
-  if (!r.ok) throw new Error(`${path} failed: ${r.status}`);
-  return r.json();
+  let payload = null;
+  try { payload = await r.json(); } catch {}
+  if (!r.ok) {
+    const code = payload?.error || `http_${r.status}`;
+    const msg = payload?.details?.[0] || payload?.message || code;
+    throw new Error(`${code}: ${msg}`);
+  }
+  return payload;
 }
 
 async function apiTimed(path, opts = {}) {
@@ -155,6 +160,38 @@ function filteredTasks() {
   );
 }
 
+function allowedTransitionsForTask(task) {
+  const actor = roleMode === 'worker' ? workerAgentMode : roleMode;
+  const isOps = actor === 'ops';
+  const isUltron = actor === 'ultron';
+  const isOwner = actor === task.owner;
+
+  const transitions = [];
+  if (task.status === 'inbox' && isOps) transitions.push({ to: 'assigned', label: 'Triage → Assigned' });
+  if (task.status === 'assigned' && isOps) transitions.push({ to: 'starting', label: 'Dispatch → Starting' });
+  if (task.status === 'starting' && isOps) transitions.push({ to: 'assigned', label: 'Recover → Assigned' });
+  if (task.status === 'starting' && isOwner) transitions.push({ to: 'in_progress', label: 'Start → In Progress' });
+  if (task.status === 'in_progress' && isOwner) transitions.push({ to: 'review', label: 'Submit → Review' });
+  if (task.status === 'in_progress' && isOwner) transitions.push({ to: 'blocked', label: 'Block' });
+  if (task.status === 'review' && isUltron) transitions.push({ to: 'done', label: 'Approve → Done' });
+  if (task.status === 'review' && (isUltron || isOps)) transitions.push({ to: 'assigned', label: 'Return → Assigned' });
+  if (task.status === 'done' && isOps) transitions.push({ to: 'archived', label: 'Archive' });
+  return transitions;
+}
+
+async function transitionTask(task, to) {
+  const actor = roleMode === 'worker' ? workerAgentMode : roleMode;
+  try {
+    await api('/api/task/update', {
+      method: 'POST',
+      body: JSON.stringify({ id: task.id, status: to, owner: task.owner, actor: `ui.action.${actor}` })
+    });
+    await refresh();
+  } catch (e) {
+    showError(`Transition rejected: ${e.message}`);
+  }
+}
+
 function renderAgents() {
   const list = $('agentList'); list.innerHTML = '';
   const wipMap = boardHealth?.team_wip || {};
@@ -181,15 +218,6 @@ function renderBoard() {
     col.className = 'col';
     col.dataset.status = status;
     col.innerHTML = `<h3>${statusTitles[status]} (…)</h3><div class="muted">Loading…</div>`;
-    col.addEventListener('dragover', (e) => e.preventDefault());
-    col.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      if (readOnly) return;
-      if (!draggedTaskId) return;
-      await api('/api/task/update', { method: 'POST', body: JSON.stringify({ id: draggedTaskId, status, actor: 'ui.dragdrop' }) });
-      draggedTaskId = null;
-      await refresh();
-    });
     kanban.appendChild(col);
     columns.set(status, col);
   }
@@ -204,16 +232,32 @@ function renderBoard() {
       scoped.slice(0, 100).forEach((t) => {
         const card = document.createElement('div');
         card.className = 'card';
-        card.draggable = true;
-        card.addEventListener('dragstart', () => { draggedTaskId = t.id; });
+        card.draggable = false;
         const reviewBadge = t.status === 'review'
           ? `<div class="meta">Reviewer: <span class="owner-chip agent-ultron">Ultron</span> <span class="muted">waiting ${ageBadge(t.updatedAt)}</span></div>`
           : '';
         const startingBadge = t.status === 'starting'
           ? `<div class="meta">${ownerChip(t.owner)} • waiting ${ageBadge(t.updatedAt)} • <span class="badge ${t.hasStartAck ? 'working' : 'blocked'}">${t.hasStartAck ? 'ack_received' : 'awaiting_ack'}</span></div>`
           : '';
-        card.innerHTML = `<div class="title">${t.title}</div><div class="meta">${t.id} • ${ownerChip(t.owner)} • ${t.priority}</div>${startingBadge}${reviewBadge}`;
-        card.onclick = () => openDrawer(t.id);
+        const transitions = allowedTransitionsForTask(t);
+        const actions = transitions.length
+          ? `<div class="meta">${transitions.map((x, idx) => `<button class="tiny-action" data-action-index="${idx}">${x.label}</button>`).join(' ')}</div>`
+          : '';
+        card.innerHTML = `<div class="title">${t.title}</div><div class="meta">${t.id} • ${ownerChip(t.owner)} • ${t.priority}</div>${startingBadge}${reviewBadge}${actions}`;
+        card.onclick = (ev) => {
+          if (ev.target && ev.target.classList && ev.target.classList.contains('tiny-action')) return;
+          openDrawer(t.id);
+        };
+        card.querySelectorAll('.tiny-action').forEach((btn) => {
+          btn.addEventListener('click', async (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const idx = Number(btn.dataset.actionIndex || 0);
+            const next = transitions[idx];
+            if (!next) return;
+            await transitionTask(t, next.to);
+          });
+        });
         col.appendChild(card);
       });
       if (scoped.length > 100) {

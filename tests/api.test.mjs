@@ -677,6 +677,17 @@ test('UI includes Starting column and starting ack/waiting render markers', asyn
   assert.equal(text.includes('waiting ${ageBadge(t.updatedAt)}'), true);
 });
 
+test('UI disables drag-drop and uses action-based transitions', async () => {
+  const app = await fetch(`${base}/ui/app.js`).then(r=>r.text());
+  const html = await fetch(`${base}/ui/index.html`).then(r=>r.text());
+  assert.equal(app.includes('card.draggable = false'), true);
+  assert.equal(app.includes('dragstart'), false);
+  assert.equal(app.includes('ui.dragdrop'), false);
+  assert.equal(app.includes("/api/task/update"), true);
+  assert.equal(app.includes('Transition rejected:'), true);
+  assert.equal(html.includes('Moves are action-based'), true);
+});
+
 test('orchestration templates + run endpoint works', async () => {
   const tpl = await fetch(`${base}/api/orchestration/templates`);
   assert.equal(tpl.status, 200);
