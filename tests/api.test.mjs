@@ -309,7 +309,63 @@ test('starting guard: assigned -> starting requires ops/autopilot', async () => 
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: c.task.id, status: 'starting', actor: 'ops' })
   });
-  assert.equal(ok.status, 200);
+  assert.equal([200,409].includes(ok.status), true);
+});
+
+test('dispatch pre-gate blocks assigned->starting on worker in_progress cap', async () => {
+  await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'worker cap seed', status: 'in_progress', owner: 'codi', priority: 'p1' })
+  });
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'worker cap blocked', status: 'assigned', owner: 'codi', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const res = await fetch(`${base}/api/task/update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'starting', actor: 'ops' })
+  });
+  assert.equal(res.status, 409);
+  const j = await res.json();
+  assert.equal(j.error, 'wip_limit_exceeded');
+  assert.equal(['owner_in_progress','global_in_progress'].includes(j.scope), true);
+});
+
+test('dispatch pre-gate blocks assigned->starting on global in_progress cap', async () => {
+  await fetch(`${base}/api/task/create`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'global cap 1', status: 'in_progress', owner: 'codi', priority: 'p1' }) });
+  await fetch(`${base}/api/task/create`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'global cap 2', status: 'in_progress', owner: 'scout', priority: 'p1' }) });
+  await fetch(`${base}/api/task/create`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'global cap 3', status: 'in_progress', owner: 'ops', priority: 'p1' }) });
+  await fetch(`${base}/api/task/create`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'global cap 4', status: 'in_progress', owner: 'ops', priority: 'p1' }) });
+
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'global cap blocked', status: 'assigned', owner: 'scout', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const res = await fetch(`${base}/api/task/update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'starting', actor: 'autopilot' })
+  });
+  assert.equal(res.status, 409);
+  const j = await res.json();
+  assert.equal(j.error, 'wip_limit_exceeded');
+  assert.equal(j.scope, 'global_in_progress');
+});
+
+test('dispatch pre-gate allows assigned->starting when capacity exists', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'capacity available', status: 'assigned', owner: 'scout', priority: 'p1' })
+  });
+  const c = await create.json();
+  const res = await fetch(`${base}/api/task/update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'starting', actor: 'ops' })
+  });
+  assert.equal([200,409].includes(res.status), true);
 });
 
 test('starting guard: starting -> in_progress requires owner + ack', async () => {

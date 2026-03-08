@@ -1649,6 +1649,19 @@ export const server = http.createServer(async (req, res) => {
       const planLimits = tenantPlan ? JSON.parse(tenantPlan.limitsJson || '{}') : {};
       const maxWipGlobal = Number(planLimits.max_wip || 4);
 
+      if (existing.status === 'assigned' && targetStatus === 'starting') {
+        const globalInProgress = await countTasksByStatus('in_progress', patch.id);
+        if (globalInProgress >= maxWipGlobal) {
+          await addEvent({ type: 'dispatch_blocked_wip_limit', message: `${patch.id} blocked assigned->starting (global_in_progress ${globalInProgress}/${maxWipGlobal})`, taskId: patch.id, actor });
+          return send(res, 409, { error: 'wip_limit_exceeded', scope: 'global_in_progress', limit: maxWipGlobal, current: globalInProgress });
+        }
+        const ownerInProgress = await countTasksByOwnerAndStatus(existing.owner, 'in_progress', patch.id);
+        if (ownerInProgress >= 1) {
+          await addEvent({ type: 'dispatch_blocked_wip_limit', message: `${patch.id} blocked assigned->starting (owner_in_progress ${existing.owner} ${ownerInProgress}/1)`, taskId: patch.id, actor });
+          return send(res, 409, { error: 'wip_limit_exceeded', scope: 'owner_in_progress', owner: existing.owner, limit: 1, current: ownerInProgress });
+        }
+      }
+
       // Hard WIP guardrails (control-plane policy)
       if (targetStatus === 'in_progress' && existing.status !== 'in_progress') {
         const globalInProgress = await countTasksByStatus('in_progress', patch.id);
