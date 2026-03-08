@@ -643,6 +643,30 @@ test('stale-run leaves non-stale starting task untouched', async () => {
   assert.equal(t.status, 'starting');
 });
 
+test('verification artifact cleanup archives only matching markers and excludes prod titles', async () => {
+  const artifact = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'scheduler handshake proof run', status: 'in_progress', owner: 'ops', priority: 'p1' })
+  }).then(r=>r.json());
+
+  const legit = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'production billing migration', status: 'in_progress', owner: 'ops', priority: 'p1' })
+  }).then(r=>r.json());
+
+  const run = await fetch(`${base}/api/autopilot/verification-artifact-cleanup-run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'apply' })
+  });
+  assert.equal(run.status, 200);
+
+  const tasks = await fetch(`${base}/api/tasks?mode=full`).then(r=>r.json());
+  const a = (tasks.tasks || []).find((t) => t.id === artifact.task.id);
+  const l = (tasks.tasks || []).find((t) => t.id === legit.task.id);
+  assert.equal(a.status, 'archived');
+  assert.equal(['in_progress','assigned','review','starting'].includes(l.status), true);
+});
+
 test('UI includes Starting column and starting ack/waiting render markers', async () => {
   const r = await fetch(`${base}/ui/app.js`);
   assert.equal(r.status, 200);

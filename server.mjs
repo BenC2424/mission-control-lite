@@ -158,6 +158,18 @@ function classifyInboxTask(task) {
   return 'legitimate work item';
 }
 
+const VERIFICATION_INCLUDE_TITLE = /(scheduler|handshake|\bwip\b|proof|canary|seed|test verification|verification artifact|sched-step|pr3a-step|ack-proof|worker cap|global cap)/i;
+const VERIFICATION_INCLUDE_NOTE = /(archived_test_seed_artifact|test_seed|verification run|canary|proof run|scheduler test|handshake test|wip gate test)/i;
+const VERIFICATION_EXCLUDE_TITLE = /(customer|prod\b|production|incident|hotfix|billing|invoice|payment|security|auth|migration|release)/i;
+
+function isVerificationArtifactTask(task) {
+  const title = String(task.title || '');
+  if (VERIFICATION_EXCLUDE_TITLE.test(title)) return false;
+  const notes = Array.isArray(task.notes) ? task.notes.map((n) => String(n.note || '')).join('\n') : '';
+  const hasInclude = VERIFICATION_INCLUDE_TITLE.test(title) || VERIFICATION_INCLUDE_NOTE.test(notes);
+  return hasInclude;
+}
+
 const DEFAULT_TENANT_ID = process.env.MCL_TENANT_ID || 'internal';
 const VALID_ROLES = new Set(['tenant_user', 'tenant_admin', 'tenant_ops', 'platform_admin']);
 
@@ -501,7 +513,18 @@ export const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/autopilot/stale-run' && req.method === 'POST') {
       const body = await parseBody(req);
       const startingTimeoutMinutes = Math.max(0, Number(body.startingTimeoutMinutes ?? 3));
-      const tasks = await listTasks();
+      let tasks = await listTasks();
+      const cleanupCandidates = tasks.filter((t) => ['review','in_progress','starting'].includes(t.status) && isVerificationArtifactTask(t));
+      const cleanupActions = [];
+      if (!READ_ONLY) {
+        for (const t of cleanupCandidates) {
+          await updateTask({ id: t.id, status: 'archived', owner: t.owner });
+          await addNote(t.id, 'archived_test_seed_artifact', 'autopilot');
+          await addEvent({ type: 'task_recovered', message: `${t.id} ${t.status}->archived reason_code=archived_test_seed_artifact`, taskId: t.id, actor: 'autopilot' });
+          cleanupActions.push({ task_id: t.id, from: t.status, to: 'archived', reason_code: 'archived_test_seed_artifact' });
+        }
+        if (cleanupActions.length > 0) tasks = await listTasks();
+      }
       const nowMs = Date.now();
       const toMs = (v) => {
         const d = new Date(v || 0).getTime();
@@ -551,7 +574,9 @@ export const server = http.createServer(async (req, res) => {
         stale_task_ids: staleTaskIds,
         recommended_actions: recommendedActions,
         recovery_candidates: [...new Set(inProgressStale.map((t) => t.owner))],
-        recovered
+        recovered,
+        verification_artifact_cleanup_count: cleanupActions.length,
+        verification_artifact_cleanup: cleanupActions
       };
 
       if (!READ_ONLY) {
@@ -629,6 +654,39 @@ export const server = http.createServer(async (req, res) => {
       }
 
       return send(res, 200, { ok: true, threshold_minutes: thresholdMinutes, ...out });
+    }
+
+    if (url.pathname === '/api/autopilot/verification-artifact-cleanup-run' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const body = await parseBody(req);
+      const mode = String(body.mode || 'apply').trim();
+      if (!['dry_run', 'apply'].includes(mode)) return send(res, 400, { error: 'validation_failed', details: ['mode must be dry_run or apply'] });
+      const statuses = new Set(['review', 'in_progress', 'starting']);
+      const tasks = (await listTasks()).filter((t) => statuses.has(t.status));
+      const candidates = tasks.filter((t) => isVerificationArtifactTask(t));
+      const actions = [];
+
+      if (mode === 'apply') {
+        for (const t of candidates) {
+          await updateTask({ id: t.id, status: 'archived', owner: t.owner });
+          await addNote(t.id, 'archived_test_seed_artifact', 'autopilot');
+          await addEvent({ type: 'task_recovered', message: `${t.id} ${t.status}->archived reason_code=archived_test_seed_artifact`, taskId: t.id, actor: 'autopilot' });
+          actions.push({ task_id: t.id, from: t.status, to: 'archived', reason_code: 'archived_test_seed_artifact' });
+        }
+      }
+
+      return send(res, 200, {
+        ok: true,
+        mode,
+        markers: {
+          include_title: String(VERIFICATION_INCLUDE_TITLE),
+          include_note: String(VERIFICATION_INCLUDE_NOTE),
+          exclude_title: String(VERIFICATION_EXCLUDE_TITLE)
+        },
+        scanned_count: tasks.length,
+        candidate_count: candidates.length,
+        actions: mode === 'apply' ? actions : candidates.map((t) => ({ task_id: t.id, from: t.status, to: 'archived', reason_code: 'archived_test_seed_artifact' }))
+      });
     }
 
     if (url.pathname === '/api/autopilot/review-run' && (req.method === 'POST' || req.method === 'GET')) {
