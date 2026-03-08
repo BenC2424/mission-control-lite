@@ -563,7 +563,7 @@ export const server = http.createServer(async (req, res) => {
         const latestReviewEnterAt = taskEvents
           .filter((e) => e.type === 'task_updated' && String(e.message || '').includes(`${task.id} -> review`))
           .map((e) => e.at)
-          .sort((a, b) => new Date(b) - new Date(a))[0] || task.updatedAt;
+          .sort((a, b) => new Date(b) - new Date(a))[0] || task.createdAt;
 
         const latestPackage = (task.notes || []).find((n) => hasCompletionPackageSections(n.note || '') && new Date(n.at || 0).getTime() >= new Date(latestReviewEnterAt || 0).getTime());
         const revisionAnchor = `${task.updatedAt || ''}|${latestPackage?.at || 'no_package'}`;
