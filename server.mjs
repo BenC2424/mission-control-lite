@@ -16,6 +16,7 @@ import {
   addNote,
   addEvent,
   assignTask,
+  isTaskAssignedToAgent,
   agentInbox,
   markInboxSeen,
   claimNext,
@@ -126,6 +127,16 @@ function getStandup(tasks) {
     ...by('review').map((t) => `- ${t.owner}: ${t.title} (${t.id})`),
     ''
   ].join('\n');
+}
+
+function hasCompletionPackageSections(note = '') {
+  const required = ['Summary', 'What changed', 'Verification steps', 'Artifacts', 'Follow-ups'];
+  return required.every((h) => new RegExp(`${h}`, 'i').test(note));
+}
+
+function inboxAgeMs(task) {
+  const ts = new Date(task.lastActivityAt || task.updatedAt || task.createdAt || 0).getTime();
+  return Number.isFinite(ts) ? (Date.now() - ts) : 0;
 }
 
 const DEFAULT_TENANT_ID = process.env.MCL_TENANT_ID || 'internal';
@@ -250,6 +261,39 @@ export const server = http.createServer(async (req, res) => {
       if (!task) return send(res, 200, { ok: true, task: null });
       await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
       return send(res, 200, { ok: true, task });
+    }
+
+    if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/complete-task') && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const agentId = url.pathname.split('/')[3];
+      const body = await parseBody(req);
+      const taskId = String(body.taskId || '').trim();
+      const completionPackage = String(body.completionPackage || body.note || '').trim();
+      if (!taskId) return send(res, 400, { error: 'validation_failed', details: ['taskId is required'] });
+      if (!completionPackage) return send(res, 400, { error: 'validation_failed', details: ['completionPackage is required'] });
+      if (!hasCompletionPackageSections(completionPackage)) {
+        return send(res, 400, { error: 'completion_package_incomplete', required: ['Summary', 'What changed', 'Verification steps', 'Artifacts', 'Follow-ups'] });
+      }
+
+      const existing = await getTaskById(taskId);
+      if (!existing) return send(res, 404, { error: 'task not found' });
+      if (existing.owner !== agentId) return send(res, 403, { error: 'forbidden_owner', owner: existing.owner });
+      const assigned = await isTaskAssignedToAgent(taskId, agentId);
+      if (!assigned) return send(res, 403, { error: 'not_assigned_worker' });
+      if (!['in_progress','review','done'].includes(existing.status)) {
+        return send(res, 409, { error: 'invalid_status_for_completion', status: existing.status });
+      }
+
+      await addNote(taskId, completionPackage, agentId);
+      await addEvent({ type: 'completion_package_written', message: `${agentId} posted completion package for ${taskId}`, taskId, actor: agentId });
+
+      if (existing.status === 'in_progress') {
+        const moved = await updateTask({ id: taskId, status: 'review', owner: agentId });
+        await addEvent({ type: 'task_updated', message: `${taskId} -> review (${agentId}) auto-transition on completion package`, taskId, actor: agentId });
+        return send(res, 200, { ok: true, task: { id: taskId, status: moved.status, owner: moved.owner }, transitioned: true });
+      }
+
+      return send(res, 200, { ok: true, task: { id: taskId, status: existing.status, owner: existing.owner }, transitioned: false, idempotent: true });
     }
 
     if (url.pathname === '/api/heartbeat/run' && req.method === 'POST') {
@@ -454,6 +498,41 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, result);
     }
 
+    if (url.pathname === '/api/autopilot/inbox-hygiene-run' && req.method === 'POST') {
+      const tasks = await listTasks();
+      const inbox = tasks.filter((t) => t.status === 'inbox');
+      const triageRequired = inbox.filter((t) => inboxAgeMs(t) > 24 * 60 * 60 * 1000);
+      const archiveCandidates = inbox.filter((t) => inboxAgeMs(t) > 72 * 60 * 60 * 1000);
+      const ownerViolations = inbox.filter((t) => t.owner !== 'ops');
+
+      const sample = (arr) => arr.slice(0, 10).map((t) => t.id);
+      const runId = `inbox-hygiene-${Date.now()}`;
+
+      if (!READ_ONLY) {
+        await addEvent({ type: 'inbox_triage_required', message: `${runId} count=${triageRequired.length} sample=${sample(triageRequired).join(',') || 'none'}`, actor: 'autopilot' });
+        await addEvent({ type: 'archive_candidate', message: `${runId} count=${archiveCandidates.length} sample=${sample(archiveCandidates).join(',') || 'none'}`, actor: 'autopilot' });
+        if (ownerViolations.length > 0) {
+          await addEvent({ type: 'inbox_owner_violation_detected', message: `${runId} count=${ownerViolations.length} sample=${sample(ownerViolations).join(',')}`, actor: 'autopilot' });
+        }
+      }
+
+      return send(res, 200, {
+        ok: true,
+        mode: 'telemetry_only',
+        run_id: runId,
+        generated_at: now(),
+        inbox_total: inbox.length,
+        inbox_triage_required_count: triageRequired.length,
+        archive_candidate_count: archiveCandidates.length,
+        inbox_owner_violation_count: ownerViolations.length,
+        sample_task_ids: {
+          triage_required: sample(triageRequired),
+          archive_candidate: sample(archiveCandidates),
+          owner_violations: sample(ownerViolations)
+        }
+      });
+    }
+
     if (url.pathname === '/api/autopilot/board-health' && req.method === 'GET') {
       const [tenantTeam, agg] = await Promise.all([
         listTenantAgents(),
@@ -548,10 +627,9 @@ export const server = http.createServer(async (req, res) => {
       const inboxViolations = tasks.filter((t) => t.status === 'inbox' && t.owner !== 'ops');
       for (const t of inboxViolations) {
         violationsFound.push({ kind: 'inbox_owner_violation', taskId: t.id, owner: t.owner });
+        violationsFlagged.push({ kind: 'inbox_owner_violation', taskId: t.id, owner: t.owner });
+        recommendedActions.push('run_normalize_contract_maintenance');
         await addEvent({ type: 'contract_violation_detected', message: `${t.id} inbox owner ${t.owner} (must be ops)`, taskId: t.id, actor: 'watchdog' });
-        const updated = await updateTask({ id: t.id, owner: 'ops', status: 'inbox' });
-        await addEvent({ type: 'contract_violation_fixed', message: `${t.id} inbox owner normalized ${t.owner} -> ${updated.owner}`, taskId: t.id, actor: 'watchdog' });
-        violationsFixed.push({ kind: 'inbox_owner_violation', taskId: t.id, from: t.owner, to: updated.owner });
       }
 
       const ultronExec = tasks.filter((t) => t.owner === 'ultron' && (t.status === 'assigned' || t.status === 'in_progress'));

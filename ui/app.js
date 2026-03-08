@@ -40,6 +40,17 @@ function actorChip(actor = 'system') {
   return `<span class="actor-chip ${tone}">${actor}</span>`;
 }
 
+function ageBadge(ts) {
+  const ms = Date.now() - new Date(ts || 0).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return 'just now';
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+
 function showFlash(message, level = 'error') {
   const el = $('flash');
   el.textContent = message;
@@ -195,7 +206,10 @@ function renderBoard() {
         card.className = 'card';
         card.draggable = true;
         card.addEventListener('dragstart', () => { draggedTaskId = t.id; });
-        card.innerHTML = `<div class="title">${t.title}</div><div class="meta">${t.id} • ${ownerChip(t.owner)} • ${t.priority}</div>`;
+        const reviewBadge = t.status === 'review'
+          ? `<div class="meta">Reviewer: <span class="owner-chip agent-ultron">Ultron</span> <span class="muted">waiting ${ageBadge(t.updatedAt)}</span></div>`
+          : '';
+        card.innerHTML = `<div class="title">${t.title}</div><div class="meta">${t.id} • ${ownerChip(t.owner)} • ${t.priority}</div>${reviewBadge}`;
         card.onclick = () => openDrawer(t.id);
         col.appendChild(card);
       });

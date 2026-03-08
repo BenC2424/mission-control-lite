@@ -148,6 +148,68 @@ test('PR-1 verify endpoint returns invalid_inbox_rows=0', async () => {
   assert.equal(json.invalid_inbox_rows, 0);
 });
 
+test('worker completion flow auto-transitions in_progress -> review', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'PR2a worker completion test', status: 'in_progress', owner: 'codi', priority: 'p1' })
+  });
+  assert.equal(create.status, 200);
+  const c = await create.json();
+
+  const assign = await fetch(`${base}/api/task/assign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskId: c.task.id, agentIds: ['codi'] })
+  });
+  assert.equal(assign.status, 200);
+
+  const completionPackage = [
+    'Summary',
+    '- done',
+    '',
+    'What changed',
+    '- file',
+    '',
+    'Verification steps',
+    '- test',
+    '',
+    'Artifacts',
+    '- log',
+    '',
+    'Follow-ups',
+    '- none'
+  ].join('\n');
+
+  const complete = await fetch(`${base}/api/agent/codi/complete-task`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskId: c.task.id, completionPackage })
+  });
+  assert.equal(complete.status, 200);
+  const cj = await complete.json();
+  assert.equal(cj.transitioned, true);
+  assert.equal(cj.task.status, 'review');
+
+  const completeAgain = await fetch(`${base}/api/agent/codi/complete-task`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskId: c.task.id, completionPackage })
+  });
+  assert.equal(completeAgain.status, 200);
+  const cj2 = await completeAgain.json();
+  assert.equal(cj2.idempotent, true);
+});
+
+test('inbox hygiene run is telemetry-only', async () => {
+  const res = await fetch(`${base}/api/autopilot/inbox-hygiene-run`, { method: 'POST' });
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(json.mode, 'telemetry_only');
+  assert.equal(typeof json.inbox_triage_required_count, 'number');
+  assert.equal(typeof json.archive_candidate_count, 'number');
+});
+
 test('orchestration templates + run endpoint works', async () => {
   const tpl = await fetch(`${base}/api/orchestration/templates`);
   assert.equal(tpl.status, 200);
