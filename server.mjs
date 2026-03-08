@@ -18,6 +18,7 @@ import {
   assignTask,
   isTaskAssignedToAgent,
   hasWorkerStartAck,
+  recordTaskStartAck,
   agentInbox,
   markInboxSeen,
   claimNext,
@@ -146,6 +147,15 @@ function hasCompletionPackageSections(note = '') {
 function inboxAgeMs(task) {
   const ts = new Date(task.lastActivityAt || task.updatedAt || task.createdAt || 0).getTime();
   return Number.isFinite(ts) ? (Date.now() - ts) : 0;
+}
+
+function classifyInboxTask(task) {
+  const text = `${String(task.title || '').toLowerCase()} ${String(task.id || '').toLowerCase()}`;
+  if (/(test|canary|fixture|probe|sandbox|demo|sample|temp|proof|owner test|assign test|pr1-check)/i.test(text)) return 'test/canary';
+  if (/(duplicate|\bdup\b)/i.test(text)) return 'duplicate';
+  if (/(obsolete|deprecated|superseded|legacy)/i.test(text)) return 'obsolete';
+  if (/(unclear|unknown|investigate|tbd|follow-up|follow up)/i.test(text)) return 'unclear';
+  return 'legitimate work item';
 }
 
 const DEFAULT_TENANT_ID = process.env.MCL_TENANT_ID || 'internal';
@@ -310,6 +320,32 @@ export const server = http.createServer(async (req, res) => {
       if (!body.agentId) return send(res, 400, { error: 'validation_failed', details: ['agentId is required'] });
       await recordHeartbeat(body.agentId, body.status || 'ok', body.summary || '');
       return send(res, 200, { ok: true });
+    }
+
+    if (url.pathname === '/api/task/ack-start' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const body = await parseBody(req);
+      const taskId = String(body.taskId || '').trim();
+      const agentId = String(body.agentId || '').trim();
+      const startedAt = String(body.startedAt || '').trim();
+      if (!taskId || !agentId || !startedAt) {
+        return send(res, 400, { error: 'validation_failed', details: ['taskId, agentId, startedAt required'] });
+      }
+      const task = await getTaskById(taskId);
+      if (!task) return send(res, 404, { error: 'task not found' });
+      if (task.status !== 'starting') return send(res, 409, { error: 'invalid_transition', status: task.status, requiredStatus: 'starting' });
+      if (task.owner !== agentId) return send(res, 403, { error: 'actor_not_allowed', owner: task.owner, agentId });
+
+      const ack = await recordTaskStartAck({
+        taskId,
+        agentId,
+        startedAt,
+        pidOrSession: body.pidOrSession || null,
+        heartbeatAt: body.heartbeatAt || null,
+        noteAt: body.noteAt || null
+      });
+      await addEvent({ type: 'task_start_ack', message: `${taskId} ack by ${agentId} started_at=${startedAt}`, taskId, actor: agentId });
+      return send(res, 200, { ok: true, ack, idempotent: true });
     }
 
     if (url.pathname === '/api/heartbeat/report' && req.method === 'GET') {
@@ -540,6 +576,39 @@ export const server = http.createServer(async (req, res) => {
           owner_violations: sample(ownerViolations)
         }
       });
+    }
+
+    if (url.pathname === '/api/autopilot/inbox-auto-triage-run' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const tasks = await listTasks();
+      const candidates = tasks.filter((t) => t.status === 'inbox' && inboxAgeMs(t) > 15 * 60 * 1000);
+      const out = { reviewed: 0, triaged: 0, archived_test: 0, left_unclear: 0, samples: { triaged: [], archived_test: [], unclear: [] } };
+
+      for (const t of candidates) {
+        out.reviewed += 1;
+        const classification = classifyInboxTask(t);
+        if (classification === 'legitimate work item') {
+          await updateTask({ id: t.id, status: 'assigned', owner: 'ops' });
+          await addNote(t.id, 'inbox_auto_triaged', 'autopilot');
+          await addEvent({ type: 'inbox_auto_triaged', message: `${t.id} inbox->assigned`, taskId: t.id, actor: 'autopilot' });
+          out.triaged += 1;
+          if (out.samples.triaged.length < 10) out.samples.triaged.push(t.id);
+        } else if (classification === 'test/canary') {
+          await updateTask({ id: t.id, status: 'archived', owner: t.owner });
+          await addNote(t.id, 'inbox_auto_archived_test', 'autopilot');
+          await addEvent({ type: 'inbox_auto_archived_test', message: `${t.id} inbox->archived`, taskId: t.id, actor: 'autopilot' });
+          out.archived_test += 1;
+          if (out.samples.archived_test.length < 10) out.samples.archived_test.push(t.id);
+        } else {
+          if (t.owner !== 'ops') await updateTask({ id: t.id, status: 'inbox', owner: 'ops' });
+          await addNote(t.id, 'inbox_triage_required', 'autopilot');
+          await addEvent({ type: 'inbox_triage_required', message: `${t.id} classification=${classification}`, taskId: t.id, actor: 'autopilot' });
+          out.left_unclear += 1;
+          if (out.samples.unclear.length < 10) out.samples.unclear.push(t.id);
+        }
+      }
+
+      return send(res, 200, { ok: true, threshold_minutes: 15, ...out });
     }
 
     if (url.pathname === '/api/autopilot/review-run' && (req.method === 'POST' || req.method === 'GET')) {
