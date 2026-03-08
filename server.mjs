@@ -70,6 +70,15 @@ const REVIEW_RUN_DEFAULT_BATCH = Math.max(1, Math.min(Number(process.env.REVIEW_
 const REVIEW_RUN_CADENCE_CRON = String(process.env.REVIEW_RUN_CRON || '*/5 * * * *');
 let reviewRunTelemetry = { run_id: null, mode: null, review_decision_count_last_run: 0, reviewed_count_last_run: 0, generated_at: null, cadence: REVIEW_RUN_CADENCE_CRON, trigger_path: '/api/autopilot/review-run' };
 
+function latestHeartbeatMap(rows = []) {
+  const map = Object.create(null);
+  for (const row of rows) {
+    if (!row?.agentId) continue;
+    if (!map[row.agentId]) map[row.agentId] = row; // preserve first (newest)
+  }
+  return map;
+}
+
 const paths = {
   tasks: join(__dirname, 'runtime', 'tasks.json'),
   agents: join(__dirname, 'config', 'agents.json'),
@@ -1000,7 +1009,7 @@ export const server = http.createServer(async (req, res) => {
       const maxWipGlobal = Number(planLimits.max_wip || 4);
 
       let metricsSnap = await getMetrics();
-      let hbMap = Object.fromEntries((metricsSnap.latestHeartbeats || []).map((h) => [h.agentId, h]));
+      let hbMap = latestHeartbeatMap(metricsSnap.latestHeartbeats || []);
       const workerHealth = (agentId) => {
         const hb = hbMap[agentId];
         if (!hb?.at) return 'unhealthy';
@@ -1059,7 +1068,7 @@ export const server = http.createServer(async (req, res) => {
         dispatchProbeAgents.push(agentId);
       }
       metricsSnap = await getMetrics();
-      hbMap = Object.fromEntries((metricsSnap.latestHeartbeats || []).map((h) => [h.agentId, h]));
+      hbMap = latestHeartbeatMap(metricsSnap.latestHeartbeats || []);
       const postProbeUnhealthyCount = [...probeCandidates].filter((a) => workerHealth(a) !== 'healthy').length;
 
       const chooseWorker = () => {

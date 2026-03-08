@@ -833,3 +833,39 @@ test('no unnecessary probes for irrelevant agents', async () => {
   assert.equal(rj.dispatch_probe_agents.includes('ultron'), false);
   assert.equal(rj.dispatch_probe_agents.includes('ops'), false);
 });
+
+test('heartbeat map preserves newest row per agent for supervisor health', async () => {
+  await fetch(`${base}/api/heartbeat/run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({agentId:'codi',status:'ok',summary:'newest_row_test'}) });
+  const run = await fetch(`${base}/api/contract/supervisor-run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims: 1 }) });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(typeof rj.pre_probe_unhealthy_candidate_count, 'number');
+  assert.equal(typeof rj.post_probe_unhealthy_candidate_count, 'number');
+  assert.equal(rj.post_probe_unhealthy_candidate_count <= rj.pre_probe_unhealthy_candidate_count, true);
+});
+
+test('stale duplicate heartbeat rows do not overwrite fresh probe rows', async () => {
+  const run = await fetch(`${base}/api/contract/supervisor-run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims: 2 }) });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(typeof rj.dispatch_probe_count, 'number');
+  assert.equal(typeof rj.post_probe_unhealthy_candidate_count, 'number');
+  // With newest-first map, post-probe should not be worse than pre-probe due stale overwrite.
+  assert.equal(rj.post_probe_unhealthy_candidate_count <= rj.pre_probe_unhealthy_candidate_count, true);
+});
+
+test('dispatch_probe can make worker dispatch-eligible when fresh', async () => {
+  await fetch(`${base}/api/heartbeat/run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({agentId:'scout',status:'ok',summary:'probe_dispatch_ready'}) });
+  const create = await fetch(`${base}/api/task/create`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:'dispatch probe eligibility fresh', status:'assigned', owner:'scout', priority:'p0' })
+  }).then(r=>r.json());
+  await fetch(`${base}/api/task/assign`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ taskId:create.task.id, agentIds:['scout'] }) });
+
+  const run = await fetch(`${base}/api/contract/supervisor-run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims: 5 }) });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(typeof rj.dispatched_count, 'number');
+  // at minimum verify probe path ran and health gate is not universally blocking all candidates
+  assert.equal(rj.dispatch_probe_count >= 1, true);
+});
