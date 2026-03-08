@@ -1025,12 +1025,13 @@ export const server = http.createServer(async (req, res) => {
 
       const snapshot = await listTasks();
       const assigned = snapshot.filter((t) => t.status === 'assigned');
+      const priorityRank = (task) => ({ p0: 0, p1: 1, p2: 2, p3: 3 }[task.priority] ?? 9);
+      const assignedAgeTs = (task) => new Date(task.lastActivityAt || task.updatedAt || task.createdAt || 0).getTime();
       const sortPri = (a, b) => {
-        const p = { p0: 0, p1: 1, p2: 2, p3: 3 };
-        const da = p[a.priority] ?? 9;
-        const db = p[b.priority] ?? 9;
+        const da = priorityRank(a);
+        const db = priorityRank(b);
         if (da !== db) return da - db;
-        return new Date(a.updatedAt || a.createdAt) - new Date(b.updatedAt || b.createdAt);
+        return assignedAgeTs(a) - assignedAgeTs(b);
       };
 
       const ownerInProgress = Object.create(null);
@@ -1042,11 +1043,19 @@ export const server = http.createServer(async (req, res) => {
 
       const recentDispatchByOwner = Object.create(null);
       const recentCutoff = Date.now() - 15 * 60 * 1000;
-      const recentEvents = (await listEvents(1000)).filter((e) => new Date(e.at).getTime() >= recentCutoff && ['dispatch_started','dispatch_attempted'].includes(e.type));
+      const timeoutCutoff = Date.now() - 10 * 60 * 1000;
+      const allRecentEvents = await listEvents(1000);
+      const recentEvents = allRecentEvents.filter((e) => new Date(e.at).getTime() >= recentCutoff && ['dispatch_started','dispatch_attempted'].includes(e.type));
       for (const e of recentEvents) {
         const m = String(e.message || '').match(/for\s+(\w+)$/) || String(e.message || '').match(/owner=(\w+)/);
         if (m) recentDispatchByOwner[m[1]] = (recentDispatchByOwner[m[1]] || 0) + 1;
       }
+      const recentStartTimeoutTaskIds = new Set(
+        allRecentEvents
+          .filter((e) => new Date(e.at).getTime() >= timeoutCutoff && String(e.message || '').includes('reason_code=worker_start_timeout'))
+          .map((e) => e.taskId)
+          .filter(Boolean)
+      );
 
       const reassigned = [];
       const skipped = [];
@@ -1055,6 +1064,8 @@ export const server = http.createServer(async (req, res) => {
       let dispatchedCount = 0;
       let skippedNotExecutionReadyCount = 0;
       let skippedAmbiguousCount = 0;
+      let skippedRecentStartTimeoutCount = 0;
+      let rankedTopSampleTaskIds = [];
 
       // Dispatch-probe heartbeat timing fix: probe only candidate workers then refresh heartbeat snapshot
       const probeCandidates = new Set();
@@ -1136,6 +1147,12 @@ export const server = http.createServer(async (req, res) => {
       // Pass 1: conservative reassignment for ops/ultron assigned tasks
       const sourceCandidates = assigned.filter((t) => ['ops', 'ultron'].includes(t.owner)).sort(sortPri);
       for (const task of sourceCandidates) {
+        if (recentStartTimeoutTaskIds.has(task.id)) {
+          skippedRecentStartTimeoutCount += 1;
+          skipped.push({ task_id: task.id, reason: 'recent_worker_start_timeout', owner: task.owner });
+          continue;
+        }
+
         const intent = classifyAssignedIntent(task);
         if (intent === 'non_execution') {
           skippedNotExecutionReadyCount += 1;
@@ -1169,7 +1186,43 @@ export const server = http.createServer(async (req, res) => {
 
       // Pass 2: dispatch existing worker-owned assigned tasks (no direct in_progress)
       const fresh = await listTasks();
-      const workerAssigned = fresh.filter((t) => workers.includes(t.owner) && t.status === 'assigned').sort(sortPri);
+      const filteredWorkerAssigned = [];
+      for (const t of fresh.filter((x) => x.status === 'assigned')) {
+        if (t.owner === 'ultron') {
+          skippedNotExecutionReadyCount += 1;
+          skipped.push({ task_id: t.id, reason: 'ultron_owner_skipped', owner: t.owner });
+          continue;
+        }
+        if (!workers.includes(t.owner)) continue;
+        const intent = classifyAssignedIntent(t);
+        if (intent === 'ambiguous') {
+          skippedAmbiguousCount += 1;
+          skipped.push({ task_id: t.id, reason: 'ambiguous', owner: t.owner });
+          await addEvent({ type: 'skipped_ambiguous', message: `${t.id} ambiguous assigned task (owner=${t.owner})`, taskId: t.id, actor: 'supervisor' });
+          continue;
+        }
+        if (recentStartTimeoutTaskIds.has(t.id)) {
+          skippedRecentStartTimeoutCount += 1;
+          skipped.push({ task_id: t.id, reason: 'recent_worker_start_timeout', owner: t.owner });
+          continue;
+        }
+        filteredWorkerAssigned.push(t);
+      }
+
+      const rankTuple = (t) => {
+        const healthRank = workerHealth(t.owner) === 'healthy' ? 0 : 1;
+        const priRank = priorityRank(t);
+        const ageRank = assignedAgeTs(t);
+        return [healthRank, priRank, ageRank];
+      };
+      const workerAssigned = filteredWorkerAssigned.sort((a, b) => {
+        const ra = rankTuple(a), rb = rankTuple(b);
+        if (ra[0] !== rb[0]) return ra[0] - rb[0];
+        if (ra[1] !== rb[1]) return ra[1] - rb[1];
+        return ra[2] - rb[2];
+      });
+      rankedTopSampleTaskIds = workerAssigned.slice(0, 5).map((t) => t.id);
+
       for (const task of workerAssigned) {
         if (dispatchedCount >= maxClaims) break;
         await dispatchAttempt(task, 'supervisor');
@@ -1189,6 +1242,8 @@ export const server = http.createServer(async (req, res) => {
         skipped_by_health_gate_count: skippedByHealthGateCount,
         skipped_not_execution_ready_count: skippedNotExecutionReadyCount,
         skipped_ambiguous_count: skippedAmbiguousCount,
+        skipped_recent_start_timeout_count: skippedRecentStartTimeoutCount,
+        ranked_top_sample_task_ids: rankedTopSampleTaskIds,
         reassigned,
         skipped_count: skipped.length,
         skipped

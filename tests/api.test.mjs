@@ -917,3 +917,39 @@ test('failed wake emits task_start_failed and keeps task in starting', async () 
   const failed = (activity.events||[]).some(e=>e.type==='task_start_failed');
   assert.equal(failed, true);
 });
+
+test('supervisor run returns ranked sample and new skip counters', async () => {
+  const run = await fetch(`${base}/api/contract/supervisor-run`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims: 3 })
+  });
+  assert.equal(run.status, 200);
+  const j = await run.json();
+  assert.equal(Array.isArray(j.ranked_top_sample_task_ids), true);
+  assert.equal(typeof j.skipped_recent_start_timeout_count, 'number');
+});
+
+test('recent worker_start_timeout task is skipped for one cycle', async () => {
+  const t = await fetch(`${base}/api/task/create`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:'Implement timeout skip candidate', status:'starting', owner:'codi', priority:'p0' })
+  }).then(r=>r.json());
+  await fetch(`${base}/api/autopilot/stale-run`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ startingTimeoutMinutes: 0 })
+  });
+  const run = await fetch(`${base}/api/contract/supervisor-run`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims: 5 })
+  }).then(r=>r.json());
+  assert.equal(run.skipped_recent_start_timeout_count >= 1, true);
+});
+
+test('ultron-owned assigned tasks are skipped from worker ranking pass', async () => {
+  const t = await fetch(`${base}/api/task/create`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:'Implement executor patch ultron owner', status:'assigned', owner:'ultron', priority:'p0' })
+  }).then(r=>r.json());
+  await fetch(`${base}/api/task/assign`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ taskId:t.task.id, agentIds:['ultron'] }) });
+  const run = await fetch(`${base}/api/contract/supervisor-run`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims: 3 })
+  }).then(r=>r.json());
+  assert.equal((run.ranked_top_sample_task_ids||[]).includes(t.task.id), false);
+});
