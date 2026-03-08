@@ -290,6 +290,95 @@ test('review transition role guards enforce actor_not_allowed', async () => {
   assert.equal(br.error, 'actor_not_allowed');
 });
 
+test('starting guard: assigned -> starting requires ops/autopilot', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'PR3a assigned to starting', status: 'assigned', owner: 'codi', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const bad = await fetch(`${base}/api/task/update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'starting', actor: 'codi' })
+  });
+  assert.equal(bad.status, 403);
+  const bj = await bad.json();
+  assert.equal(bj.error, 'actor_not_allowed');
+
+  const ok = await fetch(`${base}/api/task/update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'starting', actor: 'ops' })
+  });
+  assert.equal(ok.status, 200);
+});
+
+test('starting guard: starting -> in_progress requires owner + ack', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'PR3a starting to in_progress', status: 'starting', owner: 'ops', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const noAck = await fetch(`${base}/api/task/update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'in_progress', actor: 'ops' })
+  });
+  assert.equal(noAck.status, 409);
+  const na = await noAck.json();
+  assert.equal(na.error, 'missing_worker_ack');
+
+  await fetch(`${base}/api/task/note`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, actor: 'ops', note: 'worker_ack_start: started_at=now' })
+  });
+
+  const ok = await fetch(`${base}/api/task/update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'in_progress', actor: 'ops' })
+  });
+  const okj = await ok.json();
+  assert.equal(okj.error === 'missing_worker_ack', false);
+  assert.equal([200, 409].includes(ok.status), true);
+});
+
+test('starting guard: starting -> assigned requires ops/autopilot', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'PR3a starting to assigned', status: 'starting', owner: 'codi', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const bad = await fetch(`${base}/api/task/update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'assigned', actor: 'codi' })
+  });
+  assert.equal(bad.status, 403);
+  const bj = await bad.json();
+  assert.equal(bj.error, 'actor_not_allowed');
+
+  const ok = await fetch(`${base}/api/task/update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'assigned', actor: 'autopilot' })
+  });
+  assert.equal(ok.status, 200);
+});
+
+test('starting guard: invalid transition returns invalid_transition', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'PR3a invalid transition', status: 'starting', owner: 'codi', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const bad = await fetch(`${base}/api/task/update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'done', actor: 'ops' })
+  });
+  assert.equal(bad.status, 409);
+  const bj = await bad.json();
+  assert.equal(bj.error, 'invalid_transition');
+});
+
 test('orchestration templates + run endpoint works', async () => {
   const tpl = await fetch(`${base}/api/orchestration/templates`);
   assert.equal(tpl.status, 200);

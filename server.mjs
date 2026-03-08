@@ -17,6 +17,7 @@ import {
   addEvent,
   assignTask,
   isTaskAssignedToAgent,
+  hasWorkerStartAck,
   agentInbox,
   markInboxSeen,
   claimNext,
@@ -1531,6 +1532,33 @@ export const server = http.createServer(async (req, res) => {
       if (existing.status === 'review' && targetStatus === 'assigned' && !['ultron','ops'].includes(actor)) {
         await logEvent('task_transition_denied', `${patch.id} denied review->assigned by ${actor} (actor_not_allowed)`, patch.id, actor);
         return send(res, 403, { error: 'actor_not_allowed', from: 'review', to: 'assigned', allowed: ['ultron','ops'] });
+      }
+
+      if (existing.status === 'assigned' && targetStatus === 'starting' && !['ops','autopilot'].includes(actor)) {
+        await logEvent('task_transition_denied', `${patch.id} denied assigned->starting by ${actor} (actor_not_allowed)`, patch.id, actor);
+        return send(res, 403, { error: 'actor_not_allowed', from: 'assigned', to: 'starting', allowed: ['ops','autopilot'] });
+      }
+
+      if (existing.status === 'starting' && !['starting', 'in_progress', 'assigned'].includes(targetStatus)) {
+        await logEvent('task_transition_denied', `${patch.id} denied starting->${targetStatus} (invalid_transition)`, patch.id, actor);
+        return send(res, 409, { error: 'invalid_transition', from: 'starting', to: targetStatus });
+      }
+
+      if (existing.status === 'starting' && targetStatus === 'assigned' && !['ops','autopilot'].includes(actor)) {
+        await logEvent('task_transition_denied', `${patch.id} denied starting->assigned by ${actor} (actor_not_allowed)`, patch.id, actor);
+        return send(res, 403, { error: 'actor_not_allowed', from: 'starting', to: 'assigned', allowed: ['ops','autopilot'] });
+      }
+
+      if (existing.status === 'starting' && targetStatus === 'in_progress') {
+        if (actor !== existing.owner) {
+          await logEvent('task_transition_denied', `${patch.id} denied starting->in_progress by ${actor} (actor_not_allowed owner=${existing.owner})`, patch.id, actor);
+          return send(res, 403, { error: 'actor_not_allowed', from: 'starting', to: 'in_progress', allowed: [existing.owner] });
+        }
+        const ack = await hasWorkerStartAck(patch.id, existing.owner);
+        if (!ack) {
+          await logEvent('task_transition_denied', `${patch.id} denied starting->in_progress by ${actor} (missing_worker_ack)`, patch.id, actor);
+          return send(res, 409, { error: 'missing_worker_ack', taskId: patch.id, owner: existing.owner });
+        }
       }
 
       if (targetStatus === 'inbox' && targetOwner !== 'ops') {
