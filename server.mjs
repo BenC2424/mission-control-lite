@@ -296,10 +296,7 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { agentId, tasks: await agentInbox(agentId) });
     }
 
-    if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/wake') && req.method === 'POST') {
-      const agentId = url.pathname.split('/')[3];
-      const body = await parseBody(req);
-      await markInboxSeen(agentId);
+    const runWakeHandshake = async (agentId, opts = {}) => {
       const tasks = await listTasks();
       const startingTask = tasks
         .filter((t) => t.owner === agentId && t.status === 'starting')
@@ -307,24 +304,31 @@ export const server = http.createServer(async (req, res) => {
 
       if (!startingTask) {
         await recordHeartbeat(agentId, 'ok', 'no_actionable_tasks');
-        return send(res, 200, { ok: true, agentId, task: null, action: 'idle', inboxCount: (await agentInbox(agentId)).length });
+        return { ok: true, action: 'idle', task: null };
       }
 
       try {
-        if (body.forceAckFailure === true) throw new Error('forced_ack_failure');
+        if (opts.forceAckFailure === true) throw new Error('forced_ack_failure');
         const startedAt = now();
         await recordTaskStartAck({ taskId: startingTask.id, agentId, startedAt, heartbeatAt: startedAt, noteAt: startedAt });
         await addEvent({ type: 'task_start_ack', message: `${startingTask.id} ack by ${agentId} started_at=${startedAt}`, taskId: startingTask.id, actor: agentId });
-
         const moved = await updateTask({ id: startingTask.id, status: 'in_progress', owner: agentId });
         await addEvent({ type: 'task_started', message: `${startingTask.id} starting->in_progress by ${agentId}`, taskId: startingTask.id, actor: agentId });
         await recordHeartbeat(agentId, 'ok', `started ${startingTask.id}`);
-
-        return send(res, 200, { ok: true, agentId, task: moved, action: 'ack_and_start', inboxCount: (await agentInbox(agentId)).length });
+        return { ok: true, action: 'ack_and_start', task: moved };
       } catch (err) {
         await addEvent({ type: 'task_start_failed', message: `${startingTask.id} wake failed for ${agentId}: ${String(err.message || err)}`, taskId: startingTask.id, actor: agentId });
-        return send(res, 409, { ok: false, error: 'wake_handshake_failed', detail: String(err.message || err), taskId: startingTask.id, status: 'starting' });
+        return { ok: false, error: 'wake_handshake_failed', detail: String(err.message || err), taskId: startingTask.id, status: 'starting' };
       }
+    };
+
+    if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/wake') && req.method === 'POST') {
+      const agentId = url.pathname.split('/')[3];
+      const body = await parseBody(req);
+      await markInboxSeen(agentId);
+      const result = await runWakeHandshake(agentId, body || {});
+      if (!result.ok) return send(res, 409, result);
+      return send(res, 200, { ok: true, agentId, task: result.task, action: result.action, inboxCount: (await agentInbox(agentId)).length });
     }
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/claim-next') && req.method === 'POST') {
@@ -1120,8 +1124,13 @@ export const server = http.createServer(async (req, res) => {
         globalStarting += 1;
         await addEvent({ type: 'dispatch_started', message: `${task.id} dispatched assigned->starting for ${task.owner}`, taskId: task.id, actor });
         await addEvent({ type: 'worker_wake_triggered', message: `${task.owner} wake triggered for ${task.id}`, taskId: task.id, actor });
+        const wakeResult = await runWakeHandshake(task.owner, {});
+        if (!wakeResult.ok) {
+          skipped.push({ task_id: task.id, reason: 'wake_handshake_failed', owner: task.owner, detail: wakeResult.detail });
+          return moved; // keep in starting for timeout recovery
+        }
         dispatchedCount += 1;
-        return moved;
+        return wakeResult.task || moved;
       };
 
       // Pass 1: conservative reassignment for ops/ultron assigned tasks
