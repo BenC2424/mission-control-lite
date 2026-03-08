@@ -64,7 +64,9 @@ const __dirname = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const HOST = '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
 const READ_ONLY = ['1','true','yes','on'].includes(String(process.env.READ_ONLY || '').trim().toLowerCase());
-let reviewRunTelemetry = { run_id: null, mode: null, review_decision_count_last_run: 0, reviewed_count_last_run: 0, generated_at: null };
+const REVIEW_RUN_DEFAULT_BATCH = Math.max(1, Math.min(Number(process.env.REVIEW_RUN_BATCH_SIZE || 5), 10));
+const REVIEW_RUN_CADENCE_CRON = String(process.env.REVIEW_RUN_CRON || '*/5 * * * *');
+let reviewRunTelemetry = { run_id: null, mode: null, review_decision_count_last_run: 0, reviewed_count_last_run: 0, generated_at: null, cadence: REVIEW_RUN_CADENCE_CRON, trigger_path: '/api/autopilot/review-run' };
 
 const paths = {
   tasks: join(__dirname, 'runtime', 'tasks.json'),
@@ -539,12 +541,13 @@ export const server = http.createServer(async (req, res) => {
       });
     }
 
-    if (url.pathname === '/api/autopilot/review-run' && req.method === 'POST') {
+    if (url.pathname === '/api/autopilot/review-run' && (req.method === 'POST' || req.method === 'GET')) {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
-      const body = await parseBody(req);
-      const mode = String(body.mode || 'dry_run').trim();
+      const body = req.method === 'POST' ? await parseBody(req) : Object.fromEntries(url.searchParams.entries());
+      const defaultMode = req.method === 'GET' ? 'apply' : 'dry_run';
+      const mode = String(body.mode || defaultMode).trim();
       if (!['dry_run', 'apply'].includes(mode)) return send(res, 400, { error: 'validation_failed', details: ['mode must be dry_run or apply'] });
-      const batchSize = Math.max(1, Math.min(Number(body.batchSize || 5), 10));
+      const batchSize = Math.max(1, Math.min(Number(body.batchSize || REVIEW_RUN_DEFAULT_BATCH), 10));
       const thresholdHours = Math.max(1, Number(body.reviewAlertHours || 12));
 
       const runId = `review-run-${Date.now()}`;
@@ -618,7 +621,9 @@ export const server = http.createServer(async (req, res) => {
         mode,
         review_decision_count_last_run: decisions.filter((d) => ['approved','reassigned'].includes(d.decision)).length,
         reviewed_count_last_run: tasks.length,
-        generated_at: now()
+        generated_at: now(),
+        cadence: REVIEW_RUN_CADENCE_CRON,
+        trigger_path: '/api/autopilot/review-run'
       };
 
       return send(res, 200, {
@@ -631,6 +636,8 @@ export const server = http.createServer(async (req, res) => {
         review_decision_count_last_run: reviewRunTelemetry.review_decision_count_last_run,
         review_over_threshold_count: overThreshold.length,
         review_over_threshold_sample: overThreshold.slice(0, 10).map((t) => t.id),
+        cadence: REVIEW_RUN_CADENCE_CRON,
+        trigger_path: '/api/autopilot/review-run',
         decisions
       });
     }
@@ -691,7 +698,10 @@ export const server = http.createServer(async (req, res) => {
           mode: reviewRunTelemetry.mode,
           reviewed_count_last_run: reviewRunTelemetry.reviewed_count_last_run,
           review_decision_count_last_run: reviewRunTelemetry.review_decision_count_last_run,
-          generated_at: reviewRunTelemetry.generated_at
+          generated_at: reviewRunTelemetry.generated_at,
+          cadence: reviewRunTelemetry.cadence,
+          trigger_path: reviewRunTelemetry.trigger_path,
+          default_batch_size: REVIEW_RUN_DEFAULT_BATCH
         }
       });
     }
