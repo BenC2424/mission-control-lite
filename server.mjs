@@ -181,14 +181,33 @@ function isVerificationArtifactTask(task) {
 
 const EXECUTION_INTENT_STRONG = /(implement|fix|build|deploy|patch|refactor|migrate|write code|ship|execute|rollout|integration|endpoint|query|schema|worker runtime|scheduler patch)/i;
 const GOVERNANCE_INTENT_STRONG = /(review|governance|policy|arbitration|acceptance|approval|audit|compliance|final decision|triage-only|ops governance)/i;
+const TRIAGE_INTENT_STRONG = /(investigate|triage|follow-up|follow up|anomaly|check|unclear|unknown|tbd)/i;
+const TEST_INTENT_STRONG = /(test|canary|proof|seed|fixture|sample|demo|sandbox|probe|verification)/i;
+
+function parseIntentTag(title = '') {
+  const m = String(title).match(/^\s*\[(EXEC|GOV|TRIAGE|TEST)\]\s*/i);
+  return m ? m[1].toUpperCase() : null;
+}
 
 function classifyAssignedIntent(task) {
-  const text = `${String(task.title || '')}\n${String(task.description || '')}`;
+  const title = String(task.title || '');
+  const text = `${title}\n${String(task.description || '')}`;
+  const tag = parseIntentTag(title);
+  if (tag === 'EXEC') return { intent: 'execution_ready', tag: 'EXEC', source: 'explicit_tag' };
+  if (tag === 'GOV') return { intent: 'governance', tag: 'GOV', source: 'explicit_tag' };
+  if (tag === 'TRIAGE') return { intent: 'triage', tag: 'TRIAGE', source: 'explicit_tag' };
+  if (tag === 'TEST') return { intent: 'test', tag: 'TEST', source: 'explicit_tag' };
+
+  // conservative fallback inference only when no explicit tag
+  if (TEST_INTENT_STRONG.test(text)) return { intent: 'test', tag: null, source: 'inferred_test' };
+  if (TRIAGE_INTENT_STRONG.test(text)) return { intent: 'triage', tag: null, source: 'inferred_triage' };
+
   const exec = EXECUTION_INTENT_STRONG.test(text);
   const gov = GOVERNANCE_INTENT_STRONG.test(text);
-  if (exec && !gov) return 'execution_ready';
-  if (gov && !exec) return 'non_execution';
-  return 'ambiguous';
+  // do not auto-classify EXEC unless clearly execution-only
+  if (exec && !gov) return { intent: 'execution_ready', tag: null, source: 'inferred_exec_strong' };
+  if (gov && !exec) return { intent: 'governance', tag: null, source: 'inferred_gov_strong' };
+  return { intent: 'ambiguous', tag: null, source: 'inferred_ambiguous' };
 }
 
 const DEFAULT_TENANT_ID = process.env.MCL_TENANT_ID || 'internal';
@@ -1066,12 +1085,56 @@ export const server = http.createServer(async (req, res) => {
       let skippedAmbiguousCount = 0;
       let skippedRecentStartTimeoutCount = 0;
       let rankedTopSampleTaskIds = [];
+      let normalizedToOpsMissingExecCount = 0;
+      let normalizedToOpsMissingGovCount = 0;
+      let normalizedTotalCount = 0;
+      let autoClassifiedTestCount = 0;
+      let autoClassifiedTriageCount = 0;
+      const normalizedToOpsMissingExecSample = [];
+      const normalizedToOpsMissingGovSample = [];
+      const autoClassifiedTestSample = [];
+      const autoClassifiedTriageSample = [];
+
+      // normalization pass: intent-label precedence + conservative fallback
+      for (const t of assigned) {
+        const cls = classifyAssignedIntent(t);
+        if (cls.source === 'inferred_test') {
+          autoClassifiedTestCount += 1;
+          if (autoClassifiedTestSample.length < 5) autoClassifiedTestSample.push(t.id);
+        }
+        if (cls.source === 'inferred_triage' || cls.intent === 'ambiguous') {
+          autoClassifiedTriageCount += 1;
+          if (autoClassifiedTriageSample.length < 5) autoClassifiedTriageSample.push(t.id);
+        }
+
+        if (workers.includes(t.owner) && cls.intent !== 'execution_ready') {
+          await updateTask({ id: t.id, status: 'assigned', owner: 'ops' });
+          await addNote(t.id, 'ambiguous_missing_exec_tag', 'supervisor');
+          await addEvent({ type: 'ambiguous_missing_exec_tag', message: `${t.id} normalized ${t.owner}->ops`, taskId: t.id, actor: 'supervisor' });
+          normalizedToOpsMissingExecCount += 1;
+          normalizedTotalCount += 1;
+          if (normalizedToOpsMissingExecSample.length < 5) normalizedToOpsMissingExecSample.push(t.id);
+        }
+
+        if (t.owner === 'ultron' && cls.intent !== 'governance') {
+          await updateTask({ id: t.id, status: 'assigned', owner: 'ops' });
+          await addNote(t.id, 'ambiguous_missing_gov_tag', 'supervisor');
+          await addEvent({ type: 'ambiguous_missing_gov_tag', message: `${t.id} normalized ultron->ops`, taskId: t.id, actor: 'supervisor' });
+          normalizedToOpsMissingGovCount += 1;
+          normalizedTotalCount += 1;
+          if (normalizedToOpsMissingGovSample.length < 5) normalizedToOpsMissingGovSample.push(t.id);
+        }
+      }
+
+      const normalizedSnapshot = await listTasks();
+      const normalizedAssigned = normalizedSnapshot.filter((t) => t.status === 'assigned');
 
       // Dispatch-probe heartbeat timing fix: probe only candidate workers then refresh heartbeat snapshot
       const probeCandidates = new Set();
-      for (const t of assigned) {
+      for (const t of normalizedAssigned) {
         if (workers.includes(t.owner)) probeCandidates.add(t.owner);
-        if (['ops', 'ultron'].includes(t.owner) && classifyAssignedIntent(t) === 'execution_ready') {
+        const cls = classifyAssignedIntent(t);
+        if (['ops', 'ultron'].includes(t.owner) && cls.intent === 'execution_ready') {
           for (const w of workers) probeCandidates.add(w);
         }
       }
@@ -1094,7 +1157,7 @@ export const server = http.createServer(async (req, res) => {
             inProgress: Number(ownerInProgress[id] || 0),
             starting: Number(ownerStarting[id] || 0),
             recentDispatch: Number(recentDispatchByOwner[id] || 0),
-            assigned: assigned.filter((t) => t.owner === id).length
+            assigned: normalizedAssigned.filter((t) => t.owner === id).length
           }))
           .filter((w) => w.health === 'healthy')
           .sort((a, b) => (a.inProgress + a.starting) - (b.inProgress + b.starting) || a.recentDispatch - b.recentDispatch || a.assigned - b.assigned);
@@ -1145,7 +1208,7 @@ export const server = http.createServer(async (req, res) => {
       };
 
       // Pass 1: conservative reassignment for ops/ultron assigned tasks
-      const sourceCandidates = assigned.filter((t) => ['ops', 'ultron'].includes(t.owner)).sort(sortPri);
+      const sourceCandidates = normalizedAssigned.filter((t) => ['ops', 'ultron'].includes(t.owner)).sort(sortPri);
       for (const task of sourceCandidates) {
         if (recentStartTimeoutTaskIds.has(task.id)) {
           skippedRecentStartTimeoutCount += 1;
@@ -1153,8 +1216,8 @@ export const server = http.createServer(async (req, res) => {
           continue;
         }
 
-        const intent = classifyAssignedIntent(task);
-        if (intent === 'non_execution') {
+        const intent = classifyAssignedIntent(task).intent;
+        if (intent === 'governance' || intent === 'triage' || intent === 'test') {
           skippedNotExecutionReadyCount += 1;
           skipped.push({ task_id: task.id, reason: 'not_execution_ready', owner: task.owner });
           continue;
@@ -1194,11 +1257,16 @@ export const server = http.createServer(async (req, res) => {
           continue;
         }
         if (!workers.includes(t.owner)) continue;
-        const intent = classifyAssignedIntent(t);
-        if (intent === 'ambiguous') {
-          skippedAmbiguousCount += 1;
-          skipped.push({ task_id: t.id, reason: 'ambiguous', owner: t.owner });
-          await addEvent({ type: 'skipped_ambiguous', message: `${t.id} ambiguous assigned task (owner=${t.owner})`, taskId: t.id, actor: 'supervisor' });
+        const intent = classifyAssignedIntent(t).intent;
+        if (intent !== 'execution_ready') {
+          if (intent === 'ambiguous') {
+            skippedAmbiguousCount += 1;
+            skipped.push({ task_id: t.id, reason: 'ambiguous', owner: t.owner });
+            await addEvent({ type: 'skipped_ambiguous', message: `${t.id} ambiguous assigned task (owner=${t.owner})`, taskId: t.id, actor: 'supervisor' });
+          } else {
+            skippedNotExecutionReadyCount += 1;
+            skipped.push({ task_id: t.id, reason: 'not_execution_ready', owner: t.owner });
+          }
           continue;
         }
         if (recentStartTimeoutTaskIds.has(t.id)) {
@@ -1243,7 +1311,16 @@ export const server = http.createServer(async (req, res) => {
         skipped_not_execution_ready_count: skippedNotExecutionReadyCount,
         skipped_ambiguous_count: skippedAmbiguousCount,
         skipped_recent_start_timeout_count: skippedRecentStartTimeoutCount,
+        normalized_total_count: normalizedTotalCount,
+        normalized_to_ops_missing_exec_count: normalizedToOpsMissingExecCount,
+        normalized_to_ops_missing_gov_count: normalizedToOpsMissingGovCount,
+        auto_classified_test_count: autoClassifiedTestCount,
+        auto_classified_triage_count: autoClassifiedTriageCount,
         ranked_top_sample_task_ids: rankedTopSampleTaskIds,
+        normalized_to_ops_missing_exec_sample_task_ids: normalizedToOpsMissingExecSample,
+        normalized_to_ops_missing_gov_sample_task_ids: normalizedToOpsMissingGovSample,
+        auto_classified_test_sample_task_ids: autoClassifiedTestSample,
+        auto_classified_triage_sample_task_ids: autoClassifiedTriageSample,
         reassigned,
         skipped_count: skipped.length,
         skipped

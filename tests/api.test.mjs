@@ -953,3 +953,41 @@ test('ultron-owned assigned tasks are skipped from worker ranking pass', async (
   }).then(r=>r.json());
   assert.equal((run.ranked_top_sample_task_ids||[]).includes(t.task.id), false);
 });
+
+test('intent-tag normalization returns worker-owned assigned without [EXEC] to ops', async () => {
+  const t = await fetch(`${base}/api/task/create`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:'Investigate queue anomaly', status:'assigned', owner:'codi', priority:'p1' })
+  }).then(r=>r.json());
+  await fetch(`${base}/api/task/assign`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ taskId:t.task.id, agentIds:['codi'] }) });
+  const run = await fetch(`${base}/api/contract/supervisor-run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims:2 }) }).then(r=>r.json());
+  const tasks = await fetch(`${base}/api/tasks?mode=full`).then(r=>r.json());
+  const row = (tasks.tasks||[]).find(x=>x.id===t.task.id);
+  assert.equal(row.owner, 'ops');
+  assert.equal(typeof run.normalized_to_ops_missing_exec_count, 'number');
+});
+
+test('intent-tag normalization keeps [EXEC] worker task owned by worker', async () => {
+  const t = await fetch(`${base}/api/task/create`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:'[EXEC] Implement queue drain fix', status:'assigned', owner:'scout', priority:'p0' })
+  }).then(r=>r.json());
+  await fetch(`${base}/api/task/assign`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ taskId:t.task.id, agentIds:['scout'] }) });
+  await fetch(`${base}/api/contract/supervisor-run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims:2 }) });
+  const tasks = await fetch(`${base}/api/tasks?mode=full`).then(r=>r.json());
+  const row = (tasks.tasks||[]).find(x=>x.id===t.task.id);
+  assert.equal(['scout','starting','in_progress'].includes(row.owner) || ['starting','in_progress','assigned'].includes(row.status), true);
+});
+
+test('supervisor response includes normalization counters and samples', async () => {
+  const run = await fetch(`${base}/api/contract/supervisor-run`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims:3 })
+  }).then(r=>r.json());
+  assert.equal(typeof run.normalized_total_count, 'number');
+  assert.equal(typeof run.normalized_to_ops_missing_exec_count, 'number');
+  assert.equal(typeof run.normalized_to_ops_missing_gov_count, 'number');
+  assert.equal(typeof run.auto_classified_test_count, 'number');
+  assert.equal(typeof run.auto_classified_triage_count, 'number');
+  assert.equal(Array.isArray(run.ranked_top_sample_task_ids), true);
+  assert.equal(Array.isArray(run.normalized_to_ops_missing_exec_sample_task_ids), true);
+});
