@@ -499,6 +499,8 @@ export const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/autopilot/stale-run' && req.method === 'POST') {
+      const body = await parseBody(req);
+      const startingTimeoutMinutes = Math.max(0, Number(body.startingTimeoutMinutes ?? 3));
       const tasks = await listTasks();
       const nowMs = Date.now();
       const toMs = (v) => {
@@ -508,36 +510,52 @@ export const server = http.createServer(async (req, res) => {
       const lastActivityMs = (t) => toMs(t.lastActivityAt || t.updatedAt || t.createdAt);
 
       const assignedStale = tasks.filter((t) => t.status === 'assigned' && (nowMs - lastActivityMs(t)) > 24 * 60 * 60 * 1000);
+      const startingStale = tasks.filter((t) => t.status === 'starting' && (nowMs - lastActivityMs(t)) > startingTimeoutMinutes * 60 * 1000);
       const inProgressStale = tasks.filter((t) => t.status === 'in_progress' && (nowMs - lastActivityMs(t)) > 8 * 60 * 60 * 1000);
       const reviewStale = tasks.filter((t) => t.status === 'review' && (nowMs - lastActivityMs(t)) > 12 * 60 * 60 * 1000);
 
       const runId = `stale-run-${Date.now()}`;
       const staleTaskIds = {
         assigned: assignedStale.map((t) => t.id),
+        starting: startingStale.map((t) => t.id),
         in_progress: inProgressStale.map((t) => t.id),
         review: reviewStale.map((t) => t.id)
       };
 
       const recommendedActions = {
         assigned: 'queue_for_ops_triage',
+        starting: 'return_to_assigned_worker_start_timeout',
         in_progress: 'queue_for_recovery_check',
         review: 'return_to_assigned_for_completion_check'
       };
+
+      const recovered = [];
+      if (!READ_ONLY) {
+        for (const t of startingStale) {
+          const moved = await updateTask({ id: t.id, status: 'assigned', owner: t.owner });
+          await addNote(t.id, 'worker_start_timeout', 'autopilot');
+          await addEvent({ type: 'task_recovered', message: `${t.id} starting->assigned reason_code=worker_start_timeout`, taskId: t.id, actor: 'autopilot' });
+          recovered.push({ task_id: t.id, from: 'starting', to: moved.status, reason_code: 'worker_start_timeout' });
+        }
+      }
 
       const result = {
         ok: true,
         run_id: runId,
         generated_at: now(),
+        starting_timeout_minutes: startingTimeoutMinutes,
         assigned_stale_count: assignedStale.length,
+        starting_stale_count: startingStale.length,
         in_progress_stale_count: inProgressStale.length,
         review_stale_count: reviewStale.length,
         stale_task_ids: staleTaskIds,
         recommended_actions: recommendedActions,
-        recovery_candidates: [...new Set(inProgressStale.map((t) => t.owner))]
+        recovery_candidates: [...new Set(inProgressStale.map((t) => t.owner))],
+        recovered
       };
 
       if (!READ_ONLY) {
-        await addEvent({ type: 'autopilot_stale_run', message: `${runId} assigned=${assignedStale.length} in_progress=${inProgressStale.length} review=${reviewStale.length}`, actor: 'autopilot' });
+        await addEvent({ type: 'autopilot_stale_run', message: `${runId} assigned=${assignedStale.length} starting=${startingStale.length} in_progress=${inProgressStale.length} review=${reviewStale.length}`, actor: 'autopilot' });
       }
 
       return send(res, 200, result);

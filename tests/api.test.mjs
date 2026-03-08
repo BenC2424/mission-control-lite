@@ -600,6 +600,49 @@ test('board-health includes starting metrics', async () => {
   assert.equal(Array.isArray(j.sample_starting_task_ids), true);
 });
 
+test('stale-run recovers timed-out starting task and emits timeout note/event', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'starting timeout recover test', status: 'starting', owner: 'ops', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const run = await fetch(`${base}/api/autopilot/stale-run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ startingTimeoutMinutes: 0 })
+  });
+  assert.equal(run.status, 200);
+
+  const tasks = await fetch(`${base}/api/tasks?mode=full`);
+  const tj = await tasks.json();
+  const t = (tj.tasks || []).find((x) => x.id === c.task.id);
+  assert.equal(t.status, 'assigned');
+  assert.equal((t.notes || []).some((n) => String(n.note || '').includes('worker_start_timeout')), true);
+  const activity = await fetch(`${base}/api/activity`);
+  const aj = await activity.json();
+  const ev = (aj.events || []).find((e) => e.taskId === c.task.id && String(e.message || '').includes('reason_code=worker_start_timeout'));
+  assert.equal(!!ev, true);
+});
+
+test('stale-run leaves non-stale starting task untouched', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'starting non-stale untouched', status: 'starting', owner: 'ops', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const run = await fetch(`${base}/api/autopilot/stale-run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ startingTimeoutMinutes: 999 })
+  });
+  assert.equal(run.status, 200);
+
+  const tasks = await fetch(`${base}/api/tasks?mode=full`);
+  const tj = await tasks.json();
+  const t = (tj.tasks || []).find((x) => x.id === c.task.id);
+  assert.equal(t.status, 'starting');
+});
+
 test('UI includes Starting column and starting ack/waiting render markers', async () => {
   const r = await fetch(`${base}/ui/app.js`);
   assert.equal(r.status, 200);
