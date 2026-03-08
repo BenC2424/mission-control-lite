@@ -991,3 +991,33 @@ test('supervisor response includes normalization counters and samples', async ()
   assert.equal(Array.isArray(run.ranked_top_sample_task_ids), true);
   assert.equal(Array.isArray(run.normalized_to_ops_missing_exec_sample_task_ids), true);
 });
+
+test('normalization auto-prefixes missing TRIAGE tag conservatively', async () => {
+  const created = await fetch(`${base}/api/task/create`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:'Investigate routing anomaly', status:'assigned', owner:'ops', priority:'p1' })
+  }).then(r=>r.json());
+  const taskId = created.task.id;
+  const run = await fetch(`${base}/api/contract/supervisor-run`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims:2 })
+  }).then(r=>r.json());
+  const tasks = await fetch(`${base}/api/tasks?mode=full`).then(r=>r.json());
+  const row = (tasks.tasks||[]).find(t=>t.id===taskId);
+  assert.equal(String(row.title || '').startsWith('[TRIAGE] '), true);
+  assert.equal(typeof run.auto_prefixed_triage_count, 'number');
+});
+
+test('normalization archives clearly inferred TEST verification artifacts', async () => {
+  const created = await fetch(`${base}/api/task/create`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:'scheduler test verification seed', status:'assigned', owner:'ops', priority:'p2' })
+  }).then(r=>r.json());
+  const taskId = created.task.id;
+  const run = await fetch(`${base}/api/contract/supervisor-run`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims:2 })
+  }).then(r=>r.json());
+  const tasks = await fetch(`${base}/api/tasks?mode=full`).then(r=>r.json());
+  const row = (tasks.tasks||[]).find(t=>t.id===taskId);
+  assert.equal(row.status, 'archived');
+  assert.equal(typeof run.auto_archived_test_count, 'number');
+});

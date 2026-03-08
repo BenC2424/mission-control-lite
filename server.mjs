@@ -12,6 +12,7 @@ import {
   listEvents,
   createTask,
   updateTask,
+  updateTaskTitle,
   deleteTask,
   addNote,
   addEvent,
@@ -179,10 +180,10 @@ function isVerificationArtifactTask(task) {
   return hasInclude;
 }
 
-const EXECUTION_INTENT_STRONG = /(implement|fix|build|deploy|patch|refactor|migrate|write code|ship|execute|rollout|integration|endpoint|query|schema|worker runtime|scheduler patch)/i;
-const GOVERNANCE_INTENT_STRONG = /(review|governance|policy|arbitration|acceptance|approval|audit|compliance|final decision|triage-only|ops governance)/i;
-const TRIAGE_INTENT_STRONG = /(investigate|triage|follow-up|follow up|anomaly|check|unclear|unknown|tbd)/i;
-const TEST_INTENT_STRONG = /(test|canary|proof|seed|fixture|sample|demo|sandbox|probe|verification)/i;
+const EXECUTION_INTENT_STRONG = /(implement|fix|build|deploy|patch|refactor|migrate|write code|ship|execute|rollout|integration|endpoint|query|schema|worker runtime|scheduler patch|instrumentation|coverage|execution)/i;
+const GOVERNANCE_INTENT_STRONG = /(review|governance|policy|arbitration|acceptance|approval|audit|compliance|final decision|triage-only|ops governance|review authority)/i;
+const TRIAGE_INTENT_STRONG = /(investigate|triage|follow-up|follow up|anomaly|check|unclear|unknown|tbd|routing|escalation)/i;
+const TEST_INTENT_STRONG = /(test|canary|proof|seed|fixture|sample|demo|sandbox|probe|verification|gate test|scheduler test|handshake test|worker cap test|global cap test)/i;
 
 function parseIntentTag(title = '') {
   const m = String(title).match(/^\s*\[(EXEC|GOV|TRIAGE|TEST)\]\s*/i);
@@ -208,6 +209,21 @@ function classifyAssignedIntent(task) {
   if (exec && !gov) return { intent: 'execution_ready', tag: null, source: 'inferred_exec_strong' };
   if (gov && !exec) return { intent: 'governance', tag: null, source: 'inferred_gov_strong' };
   return { intent: 'ambiguous', tag: null, source: 'inferred_ambiguous' };
+}
+
+function intentToTag(intent) {
+  if (intent === 'execution_ready') return 'EXEC';
+  if (intent === 'governance') return 'GOV';
+  if (intent === 'triage' || intent === 'ambiguous') return 'TRIAGE';
+  if (intent === 'test') return 'TEST';
+  return null;
+}
+
+function ensureIntentTagPrefix(title = '', tag = null) {
+  if (!tag) return String(title || '');
+  const cur = String(title || '');
+  if (parseIntentTag(cur)) return cur;
+  return `[${tag}] ${cur}`;
 }
 
 const DEFAULT_TENANT_ID = process.env.MCL_TENANT_ID || 'internal';
@@ -1090,6 +1106,11 @@ export const server = http.createServer(async (req, res) => {
       let normalizedTotalCount = 0;
       let autoClassifiedTestCount = 0;
       let autoClassifiedTriageCount = 0;
+      let autoPrefixedExecCount = 0;
+      let autoPrefixedGovCount = 0;
+      let autoPrefixedTriageCount = 0;
+      let autoPrefixedTestCount = 0;
+      let autoArchivedTestCount = 0;
       const normalizedToOpsMissingExecSample = [];
       const normalizedToOpsMissingGovSample = [];
       const autoClassifiedTestSample = [];
@@ -1098,6 +1119,8 @@ export const server = http.createServer(async (req, res) => {
       // normalization pass: intent-label precedence + conservative fallback
       for (const t of assigned) {
         const cls = classifyAssignedIntent(t);
+        const titleTag = parseIntentTag(t.title || '');
+
         if (cls.source === 'inferred_test') {
           autoClassifiedTestCount += 1;
           if (autoClassifiedTestSample.length < 5) autoClassifiedTestSample.push(t.id);
@@ -1105,6 +1128,31 @@ export const server = http.createServer(async (req, res) => {
         if (cls.source === 'inferred_triage' || cls.intent === 'ambiguous') {
           autoClassifiedTriageCount += 1;
           if (autoClassifiedTriageSample.length < 5) autoClassifiedTriageSample.push(t.id);
+        }
+
+        // auto-prefix missing intent tag (explicit existing tag always wins)
+        if (!titleTag) {
+          const inferredTag = intentToTag(cls.intent);
+          if (inferredTag) {
+            const nextTitle = ensureIntentTagPrefix(t.title || '', inferredTag);
+            if (nextTitle !== String(t.title || '')) {
+              await updateTaskTitle(t.id, nextTitle);
+              await addEvent({ type: 'intent_tag_auto_prefixed', message: `${t.id} auto_prefixed_tag=[${inferredTag}]`, taskId: t.id, actor: 'supervisor' });
+              if (inferredTag === 'EXEC') autoPrefixedExecCount += 1;
+              if (inferredTag === 'GOV') autoPrefixedGovCount += 1;
+              if (inferredTag === 'TRIAGE') autoPrefixedTriageCount += 1;
+              if (inferredTag === 'TEST') autoPrefixedTestCount += 1;
+            }
+          }
+        }
+
+        // auto-archive clearly verification test artifacts only
+        if (cls.intent === 'test' && isVerificationArtifactTask(t)) {
+          await updateTask({ id: t.id, status: 'archived', owner: t.owner });
+          await addNote(t.id, 'archived_test_seed_artifact', 'supervisor');
+          await addEvent({ type: 'task_auto_archived', message: `${t.id} reason_code=archived_test_seed_artifact`, taskId: t.id, actor: 'supervisor' });
+          autoArchivedTestCount += 1;
+          continue;
         }
 
         if (workers.includes(t.owner) && cls.intent !== 'execution_ready') {
@@ -1316,6 +1364,11 @@ export const server = http.createServer(async (req, res) => {
         normalized_to_ops_missing_gov_count: normalizedToOpsMissingGovCount,
         auto_classified_test_count: autoClassifiedTestCount,
         auto_classified_triage_count: autoClassifiedTriageCount,
+        auto_prefixed_exec_count: autoPrefixedExecCount,
+        auto_prefixed_gov_count: autoPrefixedGovCount,
+        auto_prefixed_triage_count: autoPrefixedTriageCount,
+        auto_prefixed_test_count: autoPrefixedTestCount,
+        auto_archived_test_count: autoArchivedTestCount,
         ranked_top_sample_task_ids: rankedTopSampleTaskIds,
         normalized_to_ops_missing_exec_sample_task_ids: normalizedToOpsMissingExecSample,
         normalized_to_ops_missing_gov_sample_task_ids: normalizedToOpsMissingGovSample,
