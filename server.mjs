@@ -923,10 +923,11 @@ export const server = http.createServer(async (req, res) => {
           continue;
         }
 
-        const moved = await updateTask({ id: candidate.id, status: 'in_progress', owner: agentId });
-        await addEvent({ type: 'auto_claim_executed', message: `${candidate.id} auto-claimed by ${agentId}`, taskId: candidate.id, actor: 'supervisor' });
-        await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId, eventType: 'task_execution', taskId: candidate.id, tokensUsed: 5, computeMs: 15 });
-        claimed.push({ agent_id: agentId, task_id: moved.id });
+        const moved = await updateTask({ id: candidate.id, status: 'starting', owner: agentId });
+        await addEvent({ type: 'dispatch_started', message: `${candidate.id} dispatched assigned->starting for ${agentId}`, taskId: candidate.id, actor: 'supervisor' });
+        await recordHeartbeat(agentId, 'ok', `dispatch_started ${candidate.id}`);
+        await addEvent({ type: 'worker_wake_triggered', message: `${agentId} wake triggered for ${candidate.id}`, taskId: candidate.id, actor: 'supervisor' });
+        claimed.push({ agent_id: agentId, task_id: moved.id, status: moved.status });
       }
 
       return send(res, 200, { ok: true, run_id: runId, claimed_count: claimed.length, claimed, skipped_count: skipped.length, skipped });
@@ -1508,18 +1509,26 @@ export const server = http.createServer(async (req, res) => {
       if (!candidate) return send(res, 404, { error: 'no_assigned_task_available', agentId });
 
       const ownerInProgress = await countTasksByOwnerAndStatus(agentId, 'in_progress', candidate.id);
-      if (ownerInProgress >= 1) return send(res, 409, { error: 'wip_limit_exceeded', scope: 'owner_in_progress', owner: agentId, limit: 1, current: ownerInProgress });
+      if (ownerInProgress >= 1) {
+        await addEvent({ type: 'dispatch_blocked_wip_limit', message: `${candidate.id} blocked assigned->starting (owner_in_progress ${agentId} ${ownerInProgress}/1)`, taskId: candidate.id, actor: body.actor || 'autopilot' });
+        return send(res, 409, { error: 'wip_limit_exceeded', scope: 'owner_in_progress', owner: agentId, limit: 1, current: ownerInProgress });
+      }
 
       const tenantPlan = await getTenantPlan(accessCtx.tenantId);
       const planLimits = tenantPlan ? JSON.parse(tenantPlan.limitsJson || '{}') : {};
       const maxWipGlobal = Number(planLimits.max_wip || 4);
       const globalInProgress = await countTasksByStatus('in_progress', candidate.id);
-      if (globalInProgress >= maxWipGlobal) return send(res, 409, { error: 'wip_limit_exceeded', scope: 'global_in_progress', limit: maxWipGlobal, current: globalInProgress });
+      if (globalInProgress >= maxWipGlobal) {
+        await addEvent({ type: 'dispatch_blocked_wip_limit', message: `${candidate.id} blocked assigned->starting (global_in_progress ${globalInProgress}/${maxWipGlobal})`, taskId: candidate.id, actor: body.actor || 'autopilot' });
+        return send(res, 409, { error: 'wip_limit_exceeded', scope: 'global_in_progress', limit: maxWipGlobal, current: globalInProgress });
+      }
 
-      const moved = await updateTask({ id: candidate.id, status: 'in_progress', owner: agentId });
-      await addEvent({ type: 'task_claimed', message: `${candidate.id} claimed by ${agentId}`, taskId: candidate.id, actor: body.actor || agentId });
-      await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId, eventType: 'task_execution', taskId: candidate.id, tokensUsed: 5, computeMs: 15 });
-      return send(res, 200, { ok: true, claimed: true, task: { id: moved.id, title: moved.title, status: moved.status, owner: moved.owner, priority: moved.priority } });
+      const moved = await updateTask({ id: candidate.id, status: 'starting', owner: agentId });
+      await addEvent({ type: 'dispatch_started', message: `${candidate.id} dispatched assigned->starting for ${agentId}`, taskId: candidate.id, actor: body.actor || agentId });
+      await recordHeartbeat(agentId, 'ok', `dispatch_started ${candidate.id}`);
+      await addEvent({ type: 'worker_wake_triggered', message: `${agentId} wake triggered for ${candidate.id}`, taskId: candidate.id, actor: body.actor || agentId });
+      await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId, eventType: 'task_dispatch', taskId: candidate.id, tokensUsed: 2, computeMs: 8 });
+      return send(res, 200, { ok: true, claimed: true, task: { id: moved.id, title: moved.title, status: moved.status, owner: moved.owner, priority: moved.priority }, dispatch_mode: 'assigned_to_starting' });
     }
 
     if (url.pathname === '/api/orchestrate' && req.method === 'POST') {

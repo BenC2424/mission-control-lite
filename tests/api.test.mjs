@@ -358,7 +358,7 @@ test('dispatch pre-gate blocks assigned->starting on global in_progress cap', as
 test('dispatch pre-gate allows assigned->starting when capacity exists', async () => {
   const create = await fetch(`${base}/api/task/create`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title: 'capacity available', status: 'assigned', owner: 'scout', priority: 'p1' })
+    body: JSON.stringify({ title: 'capacity available', status: 'assigned', owner: 'ops', priority: 'p1' })
   });
   const c = await create.json();
   const res = await fetch(`${base}/api/task/update`, {
@@ -366,6 +366,78 @@ test('dispatch pre-gate allows assigned->starting when capacity exists', async (
     body: JSON.stringify({ id: c.task.id, status: 'starting', actor: 'ops' })
   });
   assert.equal([200,409].includes(res.status), true);
+});
+
+test('scheduler claim path dispatches assigned->starting (no direct in_progress)', async () => {
+  // cleanup owner/global pressure for deterministic dispatch
+  const pre = await fetch(`${base}/api/tasks?mode=full`);
+  const pj = await pre.json();
+  for (const t of (pj.tasks || []).filter((x) => x.status === 'in_progress' && x.owner === 'ops')) {
+    await fetch(`${base}/api/task/update`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: t.id, status: 'archived', owner: t.owner, actor: 'ops' }) });
+  }
+
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'scheduler dispatch start', status: 'assigned', owner: 'ops', priority: 'p1' })
+  });
+  const c = await create.json();
+  await fetch(`${base}/api/task/assign`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskId: c.task.id, agentIds: ['ops'] })
+  });
+
+  const claim = await fetch(`${base}/api/task/claim-next`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agentId: 'ops', actor: 'autopilot' })
+  });
+  assert.equal([200,409].includes(claim.status), true);
+  const cj = await claim.json();
+  if (claim.status === 200) {
+    assert.equal(cj.task.status, 'starting');
+    assert.equal(cj.dispatch_mode, 'assigned_to_starting');
+  } else {
+    assert.equal(cj.error, 'wip_limit_exceeded');
+  }
+});
+
+test('scheduler blocked dispatch remains assigned with dispatch_blocked_wip_limit', async () => {
+  // make agent available but force global cap
+  const pre = await fetch(`${base}/api/tasks?mode=full`);
+  const pj = await pre.json();
+  for (const t of (pj.tasks || []).filter((x) => x.status === 'in_progress' && x.owner === 'scout')) {
+    await fetch(`${base}/api/task/update`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: t.id, status: 'archived', owner: t.owner, actor: 'ops' }) });
+  }
+
+  await fetch(`${base}/api/task/create`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'sched block seed 1', status: 'in_progress', owner: 'ops', priority: 'p1' }) });
+  await fetch(`${base}/api/task/create`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'sched block seed 2', status: 'in_progress', owner: 'codi', priority: 'p1' }) });
+  await fetch(`${base}/api/task/create`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'sched block seed 3', status: 'in_progress', owner: 'ops', priority: 'p1' }) });
+  await fetch(`${base}/api/task/create`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'sched block seed 4', status: 'in_progress', owner: 'codi', priority: 'p1' }) });
+
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'sched blocked assigned', status: 'assigned', owner: 'scout', priority: 'p0' })
+  });
+  const c = await create.json();
+  await fetch(`${base}/api/task/assign`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskId: c.task.id, agentIds: ['scout'] })
+  });
+
+  const claim = await fetch(`${base}/api/task/claim-next`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agentId: 'scout', actor: 'autopilot' })
+  });
+  assert.equal(claim.status, 409);
+
+  const tasks = await fetch(`${base}/api/tasks?mode=full`);
+  const tj = await tasks.json();
+  const task = (tj.tasks || []).find((t) => t.id === c.task.id);
+  assert.equal(task.status, 'assigned');
+
+  const activity = await fetch(`${base}/api/activity`);
+  const aj = await activity.json();
+  const ev = (aj.events || []).find((e) => e.type === 'dispatch_blocked_wip_limit' && (e.taskId === c.task.id || String(e.message || '').includes('blocked assigned->starting')));
+  assert.equal(!!ev, true);
 });
 
 test('starting guard: starting -> in_progress requires owner + ack', async () => {
