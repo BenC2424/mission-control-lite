@@ -580,8 +580,10 @@ export const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/autopilot/inbox-auto-triage-run' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const body = await parseBody(req);
+      const thresholdMinutes = Math.max(0, Number(body.thresholdMinutes ?? 15));
       const tasks = await listTasks();
-      const candidates = tasks.filter((t) => t.status === 'inbox' && inboxAgeMs(t) > 15 * 60 * 1000);
+      const candidates = tasks.filter((t) => t.status === 'inbox' && inboxAgeMs(t) > thresholdMinutes * 60 * 1000);
       const out = { reviewed: 0, triaged: 0, archived_test: 0, left_unclear: 0, samples: { triaged: [], archived_test: [], unclear: [] } };
 
       for (const t of candidates) {
@@ -608,7 +610,7 @@ export const server = http.createServer(async (req, res) => {
         }
       }
 
-      return send(res, 200, { ok: true, threshold_minutes: 15, ...out });
+      return send(res, 200, { ok: true, threshold_minutes: thresholdMinutes, ...out });
     }
 
     if (url.pathname === '/api/autopilot/review-run' && (req.method === 'POST' || req.method === 'GET')) {
