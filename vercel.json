@@ -16,8 +16,5 @@
 ],
 "routes": [
 { "src": "/(.*)", "dest": "/server.mjs" }
-],
-"crons": [
-  { "path": "/api/autopilot/review-run?mode=apply&batchSize=5", "schedule": "*/5 * * * *" }
 ]
 }
