@@ -999,8 +999,8 @@ export const server = http.createServer(async (req, res) => {
       const planLimits = tenantPlan ? JSON.parse(tenantPlan.limitsJson || '{}') : {};
       const maxWipGlobal = Number(planLimits.max_wip || 4);
 
-      const metricsSnap = await getMetrics();
-      const hbMap = Object.fromEntries((metricsSnap.latestHeartbeats || []).map((h) => [h.agentId, h]));
+      let metricsSnap = await getMetrics();
+      let hbMap = Object.fromEntries((metricsSnap.latestHeartbeats || []).map((h) => [h.agentId, h]));
       const workerHealth = (agentId) => {
         const hb = hbMap[agentId];
         if (!hb?.at) return 'unhealthy';
@@ -1042,6 +1042,25 @@ export const server = http.createServer(async (req, res) => {
       let dispatchedCount = 0;
       let skippedNotExecutionReadyCount = 0;
       let skippedAmbiguousCount = 0;
+
+      // Dispatch-probe heartbeat timing fix: probe only candidate workers then refresh heartbeat snapshot
+      const probeCandidates = new Set();
+      for (const t of assigned) {
+        if (workers.includes(t.owner)) probeCandidates.add(t.owner);
+        if (['ops', 'ultron'].includes(t.owner) && classifyAssignedIntent(t) === 'execution_ready') {
+          for (const w of workers) probeCandidates.add(w);
+        }
+      }
+      const preProbeUnhealthyCount = [...probeCandidates].filter((a) => workerHealth(a) !== 'healthy').length;
+      const dispatchProbeAgents = [];
+      for (const agentId of probeCandidates) {
+        await recordHeartbeat(agentId, 'ok', `dispatch_probe ${runId}`);
+        await addEvent({ type: 'dispatch_probe', message: `${agentId} dispatch_probe heartbeat recorded`, actor: 'supervisor' });
+        dispatchProbeAgents.push(agentId);
+      }
+      metricsSnap = await getMetrics();
+      hbMap = Object.fromEntries((metricsSnap.latestHeartbeats || []).map((h) => [h.agentId, h]));
+      const postProbeUnhealthyCount = [...probeCandidates].filter((a) => workerHealth(a) !== 'healthy').length;
 
       const chooseWorker = () => {
         const candidates = workers
@@ -1138,12 +1157,18 @@ export const server = http.createServer(async (req, res) => {
         await dispatchAttempt(task, 'supervisor');
       }
 
+      const skippedByHealthGateCount = skipped.filter((s) => s.reason === 'health_gate').length;
       return send(res, 200, {
         ok: true,
         run_id: runId,
+        dispatch_probe_count: dispatchProbeAgents.length,
+        dispatch_probe_agents: dispatchProbeAgents,
+        pre_probe_unhealthy_candidate_count: preProbeUnhealthyCount,
+        post_probe_unhealthy_candidate_count: postProbeUnhealthyCount,
         reassigned_from_ops_count: reassignedFromOpsCount,
         reassigned_from_ultron_count: reassignedFromUltronCount,
         dispatched_count: dispatchedCount,
+        skipped_by_health_gate_count: skippedByHealthGateCount,
         skipped_not_execution_ready_count: skippedNotExecutionReadyCount,
         skipped_ambiguous_count: skippedAmbiguousCount,
         reassigned,

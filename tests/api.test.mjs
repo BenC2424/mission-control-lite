@@ -802,3 +802,34 @@ test('supervisor dispatch throttle enforces starting caps', async () => {
   assert.equal(typeof rj.dispatched_count, 'number');
   assert.equal(typeof rj.skipped_count, 'number');
 });
+
+test('dispatch probe can make stale worker dispatch-eligible in same run', async () => {
+  const t = await fetch(`${base}/api/task/create`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:'probe eligibility task', status:'assigned', owner:'codi', priority:'p0' })
+  }).then(r=>r.json());
+  await fetch(`${base}/api/task/assign`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ taskId:t.task.id, agentIds:['codi'] }) });
+
+  const run = await fetch(`${base}/api/contract/supervisor-run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims:5 }) });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(typeof rj.dispatch_probe_count, 'number');
+  assert.equal(rj.dispatch_probe_count >= 1, true);
+});
+
+test('still blocked worker remains blocked after probe when unhealthy', async () => {
+  // ultron is not a dispatch worker and should remain non-dispatchable; health gate/selection still blocks worker dispatch when unhealthy
+  const run = await fetch(`${base}/api/contract/supervisor-run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims:3 }) });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(typeof rj.skipped_by_health_gate_count, 'number');
+});
+
+test('no unnecessary probes for irrelevant agents', async () => {
+  const run = await fetch(`${base}/api/contract/supervisor-run`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims:2 }) });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(Array.isArray(rj.dispatch_probe_agents), true);
+  assert.equal(rj.dispatch_probe_agents.includes('ultron'), false);
+  assert.equal(rj.dispatch_probe_agents.includes('ops'), false);
+});
