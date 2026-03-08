@@ -1,5 +1,5 @@
-const statuses = ['inbox','assigned','in_progress','review','blocked','done','archived'];
-const statusTitles = { inbox:'Inbox', assigned:'Assigned', in_progress:'In Progress', review:'Review', blocked:'Blocked', done:'Done', archived:'Archived' };
+const statuses = ['inbox','assigned','starting','in_progress','review','blocked','done','archived'];
+const statusTitles = { inbox:'Inbox', assigned:'Assigned', starting:'Starting', in_progress:'In Progress', review:'Review', blocked:'Blocked', done:'Done', archived:'Archived' };
 const priorityLabel = { p0:'Highest', p1:'High', p2:'Low', p3:'Lowest' };
 const $ = (id) => document.getElementById(id);
 
@@ -209,7 +209,10 @@ function renderBoard() {
         const reviewBadge = t.status === 'review'
           ? `<div class="meta">Reviewer: <span class="owner-chip agent-ultron">Ultron</span> <span class="muted">waiting ${ageBadge(t.updatedAt)}</span></div>`
           : '';
-        card.innerHTML = `<div class="title">${t.title}</div><div class="meta">${t.id} • ${ownerChip(t.owner)} • ${t.priority}</div>${reviewBadge}`;
+        const startingBadge = t.status === 'starting'
+          ? `<div class="meta">${ownerChip(t.owner)} • waiting ${ageBadge(t.updatedAt)} • <span class="badge ${t.hasStartAck ? 'working' : 'blocked'}">${t.hasStartAck ? 'ack_received' : 'awaiting_ack'}</span></div>`
+          : '';
+        card.innerHTML = `<div class="title">${t.title}</div><div class="meta">${t.id} • ${ownerChip(t.owner)} • ${t.priority}</div>${startingBadge}${reviewBadge}`;
         card.onclick = () => openDrawer(t.id);
         col.appendChild(card);
       });
@@ -271,9 +274,9 @@ function renderMode() {
     const statusEl = $('d-status');
     if (statusEl) {
       const allowed = isOps
-        ? ['inbox','assigned','in_progress','review','blocked','done','archived']
+        ? ['inbox','assigned','starting','in_progress','review','blocked','done','archived']
         : isWorker
-          ? ['assigned','in_progress','review','blocked']
+          ? ['assigned','starting','in_progress','review','blocked']
           : ['review','done','assigned','blocked'];
       [...statusEl.options].forEach((opt) => { opt.disabled = !allowed.includes(opt.value); });
     }
@@ -366,7 +369,7 @@ function renderMetrics() {
   // Tower health bar + diagnostics
   const ch = boardHealth?.contract_health || {};
   const stale = boardHealth?.stale_bins || {};
-  const totalStale = Number(stale.assigned_gt_24h || 0) + Number(stale.in_progress_gt_8h || 0) + Number(stale.review_gt_12h || 0);
+  const totalStale = Number(stale.assigned_gt_24h || 0) + Number(stale.starting_gt_3m || 0) + Number(stale.in_progress_gt_8h || 0) + Number(stale.review_gt_12h || 0);
   $('health-flow-value').textContent = String(flow?.value ?? 'n/a');
   const healthFlowTile = $('health-flow');
   if (healthFlowTile) {

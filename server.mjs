@@ -739,6 +739,7 @@ export const server = http.createServer(async (req, res) => {
         ok: true,
         generated_at: now(),
         open_total: Number(agg.openTotal || 0),
+        starting_total: Number(agg.startingTotal || 0),
         in_progress_total: inProgressTotal,
         review_total: reviewTotal,
         blocked_total: Number(agg.blockedTotal || 0),
@@ -762,7 +763,10 @@ export const server = http.createServer(async (req, res) => {
           idle_workers_with_assigned_backlog: assignedBacklog > 0 ? idleWorkers.length : 0,
           assigned_backlog: assignedBacklog
         },
-        stale_bins: agg.staleBins || { assigned_gt_24h: 0, in_progress_gt_8h: 0, review_gt_12h: 0 },
+        stale_bins: agg.staleBins || { assigned_gt_24h: 0, starting_gt_3m: 0, in_progress_gt_8h: 0, review_gt_12h: 0 },
+        starting_over_timeout_count: Number((agg.staleBins || {}).starting_gt_3m || 0),
+        starting_oldest_age_minutes: Number(agg.startingOldestAgeMinutes || 0),
+        sample_starting_task_ids: agg.sampleStartingTaskIds || [],
         review_pressure: reviewTotal > 3 ? 'high' : reviewTotal > 1 ? 'medium' : 'low',
         wip_pressure: inProgressTotal > 4 ? 'high' : inProgressTotal > 2 ? 'medium' : 'low',
         review_loop: {

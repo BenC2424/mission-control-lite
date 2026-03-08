@@ -447,8 +447,7 @@ test('inbox auto-triage handles legit/test/unclear', async () => {
   const testId = await mk('canary smoke test task');
   const unclearId = await mk('Investigate TBD behavior');
 
-  // force age >15m by raw update through API import path is heavy; rely on existing old inbox pool too.
-  const run = await fetch(`${base}/api/autopilot/inbox-auto-triage-run`, { method: 'POST' });
+  const run = await fetch(`${base}/api/autopilot/inbox-auto-triage-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ thresholdMinutes: 0 }) });
   assert.equal(run.status, 200);
   const rj = await run.json();
   assert.equal(rj.ok, true);
@@ -461,6 +460,26 @@ test('inbox auto-triage handles legit/test/unclear', async () => {
   assert.equal(['assigned','inbox','archived'].includes(l.status), true);
   assert.equal(['archived','inbox'].includes(tt.status), true);
   assert.equal(['inbox','assigned'].includes(u.status), true);
+});
+
+test('board-health includes starting metrics', async () => {
+  const r = await fetch(`${base}/api/autopilot/board-health`);
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.equal(typeof j.starting_total, 'number');
+  assert.equal(typeof j.starting_over_timeout_count, 'number');
+  assert.equal(typeof j.starting_oldest_age_minutes, 'number');
+  assert.equal(Array.isArray(j.sample_starting_task_ids), true);
+});
+
+test('UI includes Starting column and starting ack/waiting render markers', async () => {
+  const r = await fetch(`${base}/ui/app.js`);
+  assert.equal(r.status, 200);
+  const text = await r.text();
+  assert.equal(text.includes("starting:'Starting'"), true);
+  assert.equal(text.includes('awaiting_ack'), true);
+  assert.equal(text.includes('ack_received'), true);
+  assert.equal(text.includes('waiting ${ageBadge(t.updatedAt)}'), true);
 });
 
 test('orchestration templates + run endpoint works', async () => {

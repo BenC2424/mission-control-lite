@@ -96,7 +96,7 @@
       </label>
       <label>Status
         <select id="filterStatus">
-          <option value="all">all</option><option>inbox</option><option>assigned</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option>
+          <option value="all">all</option><option>inbox</option><option>assigned</option><option>starting</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option>
         </select>
       </label>
       <label>Priority
@@ -153,7 +153,7 @@
       <div class="drawer-body">
         <div class="muted" id="d-id"></div>
         <label>Description<textarea id="d-description" rows="4" placeholder="Task details..."></textarea></label>
-        <label>Status<select id="d-status"><option>inbox</option><option>assigned</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option><option>archived</option></select></label>
+        <label>Status<select id="d-status"><option>inbox</option><option>assigned</option><option>starting</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option><option>archived</option></select></label>
         <label>Owner<select id="d-owner"><option>ultron</option><option>codi</option><option>scout</option><option>ops</option></select></label>
         <label>Priority<select id="d-priority"><option value="p3">Lowest</option><option value="p2">Low</option><option value="p1">High</option><option value="p0">Highest</option></select></label>
         <button id="saveTask">Save Task</button>
@@ -179,7 +179,7 @@
         <label>Title<input id="c-title" type="text" placeholder="Task title" /></label>
         <label>Description<textarea id="c-description" rows="4" placeholder="What exactly needs to be done?"></textarea></label>
         <label>Owner<select id="c-owner"><option>ultron</option><option>codi</option><option>scout</option><option>ops</option></select></label>
-        <label>Status<select id="c-status"><option>inbox</option><option>assigned</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option></select></label>
+        <label>Status<select id="c-status"><option>inbox</option><option>assigned</option><option>starting</option><option>in_progress</option><option>review</option><option>blocked</option><option>done</option></select></label>
         <label>Priority<select id="c-priority"><option value="p3">Lowest</option><option value="p2" selected>Low</option><option value="p1">High</option><option value="p0">Highest</option></select></label>
         <button id="createTask">Create</button>
       </div>
