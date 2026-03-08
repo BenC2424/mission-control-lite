@@ -170,6 +170,18 @@ function isVerificationArtifactTask(task) {
   return hasInclude;
 }
 
+const EXECUTION_INTENT_STRONG = /(implement|fix|build|deploy|patch|refactor|migrate|write code|ship|execute|rollout|integration|endpoint|query|schema|worker runtime|scheduler patch)/i;
+const GOVERNANCE_INTENT_STRONG = /(review|governance|policy|arbitration|acceptance|approval|audit|compliance|final decision|triage-only|ops governance)/i;
+
+function classifyAssignedIntent(task) {
+  const text = `${String(task.title || '')}\n${String(task.description || '')}`;
+  const exec = EXECUTION_INTENT_STRONG.test(text);
+  const gov = GOVERNANCE_INTENT_STRONG.test(text);
+  if (exec && !gov) return 'execution_ready';
+  if (gov && !exec) return 'non_execution';
+  return 'ambiguous';
+}
+
 const DEFAULT_TENANT_ID = process.env.MCL_TENANT_ID || 'internal';
 const VALID_ROLES = new Set(['tenant_user', 'tenant_admin', 'tenant_ops', 'platform_admin']);
 
@@ -962,51 +974,127 @@ export const server = http.createServer(async (req, res) => {
       const body = await parseBody(req);
       const maxClaims = Math.max(1, Math.min(Number(body.maxClaims || 4), 10));
       const tenantAgents = await listTenantAgents();
-      const eligibleWorkers = tenantAgents.filter((a) => a.enabled && a.agentId !== 'ultron' && a.agentId !== 'ops').map((a) => a.agentId);
+      const workers = tenantAgents.filter((a) => a.enabled && a.agentId !== 'ultron' && a.agentId !== 'ops').map((a) => a.agentId);
 
       const tenantPlan = await getTenantPlan(accessCtx.tenantId);
       const planLimits = tenantPlan ? JSON.parse(tenantPlan.limitsJson || '{}') : {};
       const maxWipGlobal = Number(planLimits.max_wip || 4);
 
-      const claimed = [];
+      const metricsSnap = await getMetrics();
+      const hbMap = Object.fromEntries((metricsSnap.latestHeartbeats || []).map((h) => [h.agentId, h]));
+      const workerHealth = (agentId) => {
+        const hb = hbMap[agentId];
+        if (!hb?.at) return 'unhealthy';
+        const ageMin = (Date.now() - new Date(hb.at).getTime()) / 60000;
+        if (ageMin <= 30) return 'healthy';
+        if (ageMin <= 120) return 'degraded';
+        return 'unhealthy';
+      };
+
+      const snapshot = await listTasks();
+      const assigned = snapshot.filter((t) => t.status === 'assigned');
+      const sortPri = (a, b) => {
+        const p = { p0: 0, p1: 1, p2: 2, p3: 3 };
+        const da = p[a.priority] ?? 9;
+        const db = p[b.priority] ?? 9;
+        if (da !== db) return da - db;
+        return new Date(a.updatedAt || a.createdAt) - new Date(b.updatedAt || b.createdAt);
+      };
+
+      const ownerInProgress = Object.create(null);
+      for (const t of snapshot.filter((t) => t.status === 'in_progress')) ownerInProgress[t.owner] = (ownerInProgress[t.owner] || 0) + 1;
+      let globalInProgress = snapshot.filter((t) => t.status === 'in_progress').length;
+
+      const reassigned = [];
       const skipped = [];
+      let reassignedFromOpsCount = 0;
+      let reassignedFromUltronCount = 0;
+      let dispatchedCount = 0;
+      let skippedNotExecutionReadyCount = 0;
+      let skippedAmbiguousCount = 0;
 
-      for (const agentId of eligibleWorkers) {
-        if (claimed.length >= maxClaims) break;
+      const chooseWorker = () => {
+        const candidates = workers
+          .map((id) => ({ id, health: workerHealth(id), inProgress: Number(ownerInProgress[id] || 0), assigned: assigned.filter((t) => t.owner === id).length }))
+          .filter((w) => w.health !== 'unhealthy')
+          .sort((a, b) => a.inProgress - b.inProgress || a.assigned - b.assigned);
+        return candidates[0]?.id || null;
+      };
 
-        const snapshot = await listTasks();
-        const globalInProgress = snapshot.filter((t) => t.status === 'in_progress').length;
+      const dispatchAttempt = async (task, actor) => {
+        await addEvent({ type: 'dispatch_attempted', message: `${task.id} attempt assigned->starting owner=${task.owner}`, taskId: task.id, actor });
         if (globalInProgress >= maxWipGlobal) {
-          skipped.push({ agent_id: agentId, reason: 'global_wip_cap_reached', current: globalInProgress, limit: maxWipGlobal });
-          break;
+          await addEvent({ type: 'dispatch_blocked_wip_limit', message: `${task.id} blocked assigned->starting (global_in_progress ${globalInProgress}/${maxWipGlobal})`, taskId: task.id, actor });
+          skipped.push({ task_id: task.id, reason: 'global_wip_cap_reached', current: globalInProgress, limit: maxWipGlobal });
+          return false;
         }
+        if (Number(ownerInProgress[task.owner] || 0) >= 1) {
+          await addEvent({ type: 'dispatch_blocked_wip_limit', message: `${task.id} blocked assigned->starting (owner_in_progress ${task.owner} ${ownerInProgress[task.owner]}/1)`, taskId: task.id, actor });
+          skipped.push({ task_id: task.id, reason: 'owner_wip_cap_reached', owner: task.owner, current: ownerInProgress[task.owner], limit: 1 });
+          return false;
+        }
+        const moved = await updateTask({ id: task.id, status: 'starting', owner: task.owner });
+        await addEvent({ type: 'dispatch_started', message: `${task.id} dispatched assigned->starting for ${task.owner}`, taskId: task.id, actor });
+        await recordHeartbeat(task.owner, 'ok', `dispatch_started ${task.id}`);
+        await addEvent({ type: 'worker_wake_triggered', message: `${task.owner} wake triggered for ${task.id}`, taskId: task.id, actor });
+        dispatchedCount += 1;
+        return moved;
+      };
 
-        const existing = snapshot.find((t) => t.owner === agentId && t.status === 'in_progress');
-        if (existing) {
-          skipped.push({ agent_id: agentId, reason: 'already_in_progress', task_id: existing.id });
+      // Pass 1: conservative reassignment for ops/ultron assigned tasks
+      const sourceCandidates = assigned.filter((t) => ['ops', 'ultron'].includes(t.owner)).sort(sortPri);
+      for (const task of sourceCandidates) {
+        const intent = classifyAssignedIntent(task);
+        if (intent === 'non_execution') {
+          skippedNotExecutionReadyCount += 1;
+          skipped.push({ task_id: task.id, reason: 'not_execution_ready', owner: task.owner });
+          continue;
+        }
+        if (intent === 'ambiguous') {
+          skippedAmbiguousCount += 1;
+          skipped.push({ task_id: task.id, reason: 'ambiguous', owner: task.owner });
+          await addEvent({ type: 'skipped_ambiguous', message: `${task.id} ambiguous assigned task (owner=${task.owner})`, taskId: task.id, actor: 'supervisor' });
           continue;
         }
 
-        const candidate = await claimNext(agentId);
-        if (!candidate) {
-          skipped.push({ agent_id: agentId, reason: 'no_assigned_task_available' });
+        const worker = chooseWorker();
+        if (!worker) {
+          skippedAmbiguousCount += 1;
+          skipped.push({ task_id: task.id, reason: 'no_worker_selected', owner: task.owner });
           continue;
         }
 
-        const ownerInProgress = await countTasksByOwnerAndStatus(agentId, 'in_progress', candidate.id);
-        if (ownerInProgress >= 1) {
-          skipped.push({ agent_id: agentId, reason: 'owner_wip_cap_reached', current: ownerInProgress, limit: 1 });
-          continue;
-        }
+        const moved = await updateTask({ id: task.id, status: 'assigned', owner: worker });
+        const eventType = task.owner === 'ops' ? 'reassigned_from_ops' : 'reassigned_from_ultron';
+        await addEvent({ type: eventType, message: `${task.id} reassigned ${task.owner} -> ${worker}`, taskId: task.id, actor: 'supervisor' });
+        reassigned.push({ task_id: task.id, from_owner: task.owner, to_owner: worker });
+        if (task.owner === 'ops') reassignedFromOpsCount += 1;
+        if (task.owner === 'ultron') reassignedFromUltronCount += 1;
 
-        const moved = await updateTask({ id: candidate.id, status: 'starting', owner: agentId });
-        await addEvent({ type: 'dispatch_started', message: `${candidate.id} dispatched assigned->starting for ${agentId}`, taskId: candidate.id, actor: 'supervisor' });
-        await recordHeartbeat(agentId, 'ok', `dispatch_started ${candidate.id}`);
-        await addEvent({ type: 'worker_wake_triggered', message: `${agentId} wake triggered for ${candidate.id}`, taskId: candidate.id, actor: 'supervisor' });
-        claimed.push({ agent_id: agentId, task_id: moved.id, status: moved.status });
+        await dispatchAttempt({ ...moved, owner: worker }, 'supervisor');
+        if (reassigned.length >= maxClaims) break;
       }
 
-      return send(res, 200, { ok: true, run_id: runId, claimed_count: claimed.length, claimed, skipped_count: skipped.length, skipped });
+      // Pass 2: dispatch existing worker-owned assigned tasks (no direct in_progress)
+      const fresh = await listTasks();
+      const workerAssigned = fresh.filter((t) => workers.includes(t.owner) && t.status === 'assigned').sort(sortPri);
+      for (const task of workerAssigned) {
+        if (dispatchedCount >= maxClaims) break;
+        await dispatchAttempt(task, 'supervisor');
+      }
+
+      return send(res, 200, {
+        ok: true,
+        run_id: runId,
+        reassigned_from_ops_count: reassignedFromOpsCount,
+        reassigned_from_ultron_count: reassignedFromUltronCount,
+        dispatched_count: dispatchedCount,
+        skipped_not_execution_ready_count: skippedNotExecutionReadyCount,
+        skipped_ambiguous_count: skippedAmbiguousCount,
+        reassigned,
+        skipped_count: skipped.length,
+        skipped
+      });
     }
 
     if (url.pathname === '/api/contract/load-balance-run' && req.method === 'POST') {

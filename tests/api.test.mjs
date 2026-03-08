@@ -711,3 +711,40 @@ test('orchestration templates + run endpoint works', async () => {
   assert.equal(rj.ok, true);
   assert.equal(rj.plan.template, 'build_orchestra');
 });
+
+test('supervisor-run conservative reassignment + reporting counters', async () => {
+  const opsExec = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Implement queue processor patch', status: 'assigned', owner: 'ops', priority: 'p0' })
+  }).then(r=>r.json());
+  await fetch(`${base}/api/task/assign`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ taskId: opsExec.task.id, agentIds:['ops'] }) });
+
+  const ultronGov = await fetch(`${base}/api/task/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Governance review policy decision', status: 'assigned', owner: 'ultron', priority: 'p1' })
+  }).then(r=>r.json());
+  await fetch(`${base}/api/task/assign`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ taskId: ultronGov.task.id, agentIds:['ultron'] }) });
+
+  const run = await fetch(`${base}/api/contract/supervisor-run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ maxClaims: 5 })
+  });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(typeof rj.reassigned_from_ops_count, 'number');
+  assert.equal(typeof rj.reassigned_from_ultron_count, 'number');
+  assert.equal(typeof rj.dispatched_count, 'number');
+  assert.equal(typeof rj.skipped_not_execution_ready_count, 'number');
+  assert.equal(typeof rj.skipped_ambiguous_count, 'number');
+});
+
+test('supervisor-run emits required event annotations', async () => {
+  const run = await fetch(`${base}/api/contract/supervisor-run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxClaims: 3 })
+  });
+  assert.equal(run.status, 200);
+  const activity = await fetch(`${base}/api/activity`);
+  const aj = await activity.json();
+  const types = new Set((aj.events || []).map((e) => e.type));
+  assert.equal(types.has('dispatch_attempted') || types.has('reassigned_from_ops') || types.has('reassigned_from_ultron') || types.has('skipped_ambiguous') || types.has('dispatch_blocked_wip_limit'), true);
+});
