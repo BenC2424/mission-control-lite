@@ -289,6 +289,7 @@ export const server = http.createServer(async (req, res) => {
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/wake') && req.method === 'POST') {
       const agentId = url.pathname.split('/')[3];
+      const body = await parseBody(req);
       await markInboxSeen(agentId);
       const tasks = await listTasks();
       const startingTask = tasks
@@ -300,15 +301,21 @@ export const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, agentId, task: null, action: 'idle', inboxCount: (await agentInbox(agentId)).length });
       }
 
-      const startedAt = now();
-      await recordTaskStartAck({ taskId: startingTask.id, agentId, startedAt, heartbeatAt: startedAt, noteAt: startedAt });
-      await addEvent({ type: 'task_start_ack', message: `${startingTask.id} ack by ${agentId} started_at=${startedAt}`, taskId: startingTask.id, actor: agentId });
+      try {
+        if (body.forceAckFailure === true) throw new Error('forced_ack_failure');
+        const startedAt = now();
+        await recordTaskStartAck({ taskId: startingTask.id, agentId, startedAt, heartbeatAt: startedAt, noteAt: startedAt });
+        await addEvent({ type: 'task_start_ack', message: `${startingTask.id} ack by ${agentId} started_at=${startedAt}`, taskId: startingTask.id, actor: agentId });
 
-      const moved = await updateTask({ id: startingTask.id, status: 'in_progress', owner: agentId });
-      await addEvent({ type: 'task_started', message: `${startingTask.id} starting->in_progress by ${agentId}`, taskId: startingTask.id, actor: agentId });
-      await recordHeartbeat(agentId, 'ok', `started ${startingTask.id}`);
+        const moved = await updateTask({ id: startingTask.id, status: 'in_progress', owner: agentId });
+        await addEvent({ type: 'task_started', message: `${startingTask.id} starting->in_progress by ${agentId}`, taskId: startingTask.id, actor: agentId });
+        await recordHeartbeat(agentId, 'ok', `started ${startingTask.id}`);
 
-      return send(res, 200, { ok: true, agentId, task: moved, action: 'ack_and_start', inboxCount: (await agentInbox(agentId)).length });
+        return send(res, 200, { ok: true, agentId, task: moved, action: 'ack_and_start', inboxCount: (await agentInbox(agentId)).length });
+      } catch (err) {
+        await addEvent({ type: 'task_start_failed', message: `${startingTask.id} wake failed for ${agentId}: ${String(err.message || err)}`, taskId: startingTask.id, actor: agentId });
+        return send(res, 409, { ok: false, error: 'wake_handshake_failed', detail: String(err.message || err), taskId: startingTask.id, status: 'starting' });
+      }
     }
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/claim-next') && req.method === 'POST') {

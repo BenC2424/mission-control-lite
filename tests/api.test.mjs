@@ -750,19 +750,40 @@ test('supervisor-run emits required event annotations', async () => {
 });
 
 test('wake path acks and starts starting task to in_progress', async () => {
+  const pre = await fetch(`${base}/api/tasks?mode=full`).then(r=>r.json());
+  for (const t of (pre.tasks||[]).filter(x=>x.status==='starting' && x.owner==='scout')) {
+    await fetch(`${base}/api/task/update`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id:t.id, status:'assigned', owner:t.owner, actor:'ops' }) });
+  }
+
   const create = await fetch(`${base}/api/task/create`, {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ title:'wake-ack-start-proof', status:'starting', owner:'codi', priority:'p1' })
+    body: JSON.stringify({ title:'wake-ack-start-proof', status:'starting', owner:'scout', priority:'p1' })
   }).then(r=>r.json());
-  const w = await fetch(`${base}/api/agent/codi/wake`, { method:'POST' });
+  const w = await fetch(`${base}/api/agent/scout/wake`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
   assert.equal(w.status, 200);
   const wj = await w.json();
   assert.equal(wj.action, 'ack_and_start');
   const tasks = await fetch(`${base}/api/tasks?mode=full`).then(r=>r.json());
   const t = (tasks.tasks||[]).find(x=>x.id===create.task.id);
   assert.equal(t.status, 'in_progress');
-  const hasAck = (t.notes||[]).some(n=>String(n.note||'').includes('worker_ack_start'));
-  assert.equal(typeof hasAck, 'boolean');
+});
+
+test('wake ack failure keeps task in starting', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:'wake-ack-failure-proof', status:'starting', owner:'scout', priority:'p1' })
+  }).then(r=>r.json());
+
+  const w = await fetch(`${base}/api/agent/scout/wake`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ forceAckFailure: true })
+  });
+  assert.equal(w.status, 409);
+  const wj = await w.json();
+  assert.equal(wj.error, 'wake_handshake_failed');
+
+  const tasks = await fetch(`${base}/api/tasks?mode=full`).then(r=>r.json());
+  const t = (tasks.tasks||[]).find(x=>x.id===create.task.id);
+  assert.equal(t.status, 'starting');
 });
 
 test('supervisor dispatch throttle enforces starting caps', async () => {
