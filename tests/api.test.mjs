@@ -47,7 +47,7 @@ test('POST /api/task/delete deletes created task', async () => {
   const create = await fetch(`${base}/api/task/create`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title: 'Delete me', status: 'inbox', owner: 'ultron', priority: 'p2' })
+    body: JSON.stringify({ title: 'Delete me', status: 'inbox', owner: 'ops', priority: 'p2' })
   });
   const created = await create.json();
   const id = created.task.id;
@@ -114,6 +114,38 @@ test('metrics and escalations endpoints respond', async () => {
   assert.equal(e.status, 200);
   const ej = await e.json();
   assert.equal(Array.isArray(ej.items), true);
+});
+
+test('PR-1 guard: create rejects inbox owned by non-ops', async () => {
+  const res = await fetch(`${base}/api/task/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'PR1 invalid inbox owner', status: 'inbox', owner: 'codi', priority: 'p1' })
+  });
+  assert.equal(res.status, 409);
+  const json = await res.json();
+  assert.equal(json.error, 'inbox_owner_must_be_ops');
+});
+
+test('PR-1 guard: create allows inbox owned by ops', async () => {
+  const res = await fetch(`${base}/api/task/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'PR1 valid inbox owner', status: 'inbox', owner: 'ops', priority: 'p1' })
+  });
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(json.task.owner, 'ops');
+  assert.equal(json.task.status, 'inbox');
+});
+
+test('PR-1 verify endpoint returns invalid_inbox_rows=0', async () => {
+  const res = await fetch(`${base}/api/pr1/verify`);
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(json.ok, true);
+  assert.equal(typeof json.invalid_inbox_rows, 'number');
+  assert.equal(json.invalid_inbox_rows, 0);
 });
 
 test('orchestration templates + run endpoint works', async () => {

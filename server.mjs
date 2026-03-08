@@ -54,7 +54,8 @@ import {
   listTenantUsers,
   recordUsageEvent,
   getUsageSummary,
-  getBoardHealthAggregates
+  getBoardHealthAggregates,
+  getPr1InboxInvariantCount
 } from './lib/db.mjs';
 import { loadPolicies, buildOrchestrationPlan } from './lib/orchestration.mjs';
 
@@ -187,6 +188,16 @@ export const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/metrics' && req.method === 'GET') return send(res, 200, await getMetrics());
+    if (url.pathname === '/api/pr1/verify' && req.method === 'GET') {
+      const proof = await getPr1InboxInvariantCount();
+      return send(res, 200, {
+        ok: true,
+        migration_id: '20260308_001_pr1_inbox_ownership_invariant',
+        query: proof.query,
+        tenant_id: proof.tenantId,
+        invalid_inbox_rows: proof.invalidInboxRows
+      });
+    }
     if (url.pathname === '/api/escalations' && req.method === 'GET') return send(res, 200, { items: await getEscalations(100) });
     if (url.pathname === '/api/orchestration/templates' && req.method === 'GET') {
       const policy = loadPolicies();
@@ -1276,12 +1287,19 @@ export const server = http.createServer(async (req, res) => {
       const validation = validateTaskCreate(body);
       if (!validation.ok) return send(res, 400, { error: 'validation_failed', details: validation.errors });
 
+      const targetStatus = body.status || 'inbox';
+      const targetOwner = body.owner || (targetStatus === 'inbox' ? 'ops' : 'unassigned');
+      if (targetStatus === 'inbox' && targetOwner !== 'ops') {
+        await logEvent('task_transition_denied', `create denied -> inbox with owner ${targetOwner} (must be ops)`, null, body.actor || 'ui');
+        return send(res, 409, { error: 'inbox_owner_must_be_ops', requiredOwner: 'ops', status: 'inbox' });
+      }
+
       const task = {
         id: `mcl-${randomUUID().slice(0, 8)}`,
         title: body.title.trim(),
-        status: body.status || 'inbox',
+        status: targetStatus,
         priority: body.priority || 'p2',
-        owner: body.owner || 'unassigned',
+        owner: targetOwner,
         createdAt: now(),
         updatedAt: now()
       };
@@ -1307,7 +1325,7 @@ export const server = http.createServer(async (req, res) => {
 
       if (targetStatus === 'inbox' && targetOwner !== 'ops') {
         await logEvent('task_transition_denied', `${patch.id} denied -> inbox with owner ${targetOwner} (must be ops)`, patch.id, patch.actor || 'ui');
-        return send(res, 409, { error: 'invalid_inbox_owner', requiredOwner: 'ops', status: 'inbox' });
+        return send(res, 409, { error: 'inbox_owner_must_be_ops', requiredOwner: 'ops', status: 'inbox' });
       }
       if (targetOwner === 'ultron' && (targetStatus === 'assigned' || targetStatus === 'in_progress')) {
         await logEvent('task_transition_denied', `${patch.id} denied -> ${targetStatus} with owner ultron (execution states not allowed)`, patch.id, patch.actor || 'ui');

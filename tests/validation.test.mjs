@@ -7,6 +7,11 @@ test('validateTaskCreate accepts valid payload', () => {
   assert.equal(out.ok, true);
 });
 
+test('validateTaskCreate accepts ops owner', () => {
+  const out = validateTaskCreate({ title: 'Ops triage task', owner: 'ops', status: 'inbox', priority: 'p1' });
+  assert.equal(out.ok, true);
+});
+
 test('validateTaskCreate rejects short title', () => {
   const out = validateTaskCreate({ title: 'x' });
   assert.equal(out.ok, false);
