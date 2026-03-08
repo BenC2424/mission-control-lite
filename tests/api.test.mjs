@@ -210,6 +210,86 @@ test('inbox hygiene run is telemetry-only', async () => {
   assert.equal(typeof json.archive_candidate_count, 'number');
 });
 
+test('review-run dry_run evaluates and returns decisions without mutating', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'PR3 review dry-run', status: 'review', owner: 'codi', priority: 'p1' })
+  });
+  const c = await create.json();
+  await fetch(`${base}/api/task/note`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, actor: 'codi', note: 'Summary\nWhat changed\nVerification steps\nArtifacts\nFollow-ups' })
+  });
+
+  const run = await fetch(`${base}/api/autopilot/review-run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'dry_run', batchSize: 5 })
+  });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(rj.mode, 'dry_run');
+  assert.equal(Array.isArray(rj.decisions), true);
+
+  const tasks = await fetch(`${base}/api/tasks?mode=full`);
+  const tj = await tasks.json();
+  const task = (tj.tasks || []).find((t) => t.id === c.task.id);
+  assert.equal(task.status, 'review');
+});
+
+test('review-run apply reassigns incomplete packages with reason_code', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'PR3 review apply incomplete', status: 'review', owner: 'codi', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const run = await fetch(`${base}/api/autopilot/review-run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'apply', batchSize: 10 })
+  });
+  assert.equal(run.status, 200);
+  const rj = await run.json();
+  assert.equal(typeof rj.review_decision_count_last_run, 'number');
+
+  const tasks = await fetch(`${base}/api/tasks?mode=full`);
+  const tj = await tasks.json();
+  const task = (tj.tasks || []).find((t) => t.id === c.task.id);
+  assert.equal(task.status, 'assigned');
+  assert.equal((task.notes || []).some((n) => String(n.note || '').includes('review_package_incomplete')), true);
+});
+
+test('review transition role guards enforce actor_not_allowed', async () => {
+  const create = await fetch(`${base}/api/task/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'PR3 role guard', status: 'review', owner: 'codi', priority: 'p1' })
+  });
+  const c = await create.json();
+
+  const badDone = await fetch(`${base}/api/task/update`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'done', owner: 'codi', actor: 'codi' })
+  });
+  assert.equal(badDone.status, 403);
+  const bd = await badDone.json();
+  assert.equal(bd.error, 'actor_not_allowed');
+
+  const badReassign = await fetch(`${base}/api/task/update`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.task.id, status: 'assigned', owner: 'codi', actor: 'scout' })
+  });
+  assert.equal(badReassign.status, 403);
+  const br = await badReassign.json();
+  assert.equal(br.error, 'actor_not_allowed');
+});
+
 test('orchestration templates + run endpoint works', async () => {
   const tpl = await fetch(`${base}/api/orchestration/templates`);
   assert.equal(tpl.status, 200);

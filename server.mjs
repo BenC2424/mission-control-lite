@@ -64,6 +64,7 @@ const __dirname = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const HOST = '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
 const READ_ONLY = ['1','true','yes','on'].includes(String(process.env.READ_ONLY || '').trim().toLowerCase());
+let reviewRunTelemetry = { run_id: null, mode: null, review_decision_count_last_run: 0, reviewed_count_last_run: 0, generated_at: null };
 
 const paths = {
   tasks: join(__dirname, 'runtime', 'tasks.json'),
@@ -129,9 +130,14 @@ function getStandup(tasks) {
   ].join('\n');
 }
 
+const COMPLETION_PACKAGE_HEADERS = ['Summary', 'What changed', 'Verification steps', 'Artifacts', 'Follow-ups'];
+
+function getMissingCompletionPackageSections(note = '') {
+  return COMPLETION_PACKAGE_HEADERS.filter((h) => !new RegExp(`${h}`, 'i').test(note));
+}
+
 function hasCompletionPackageSections(note = '') {
-  const required = ['Summary', 'What changed', 'Verification steps', 'Artifacts', 'Follow-ups'];
-  return required.every((h) => new RegExp(`${h}`, 'i').test(note));
+  return getMissingCompletionPackageSections(note).length === 0;
 }
 
 function inboxAgeMs(task) {
@@ -533,6 +539,102 @@ export const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (url.pathname === '/api/autopilot/review-run' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const body = await parseBody(req);
+      const mode = String(body.mode || 'dry_run').trim();
+      if (!['dry_run', 'apply'].includes(mode)) return send(res, 400, { error: 'validation_failed', details: ['mode must be dry_run or apply'] });
+      const batchSize = Math.max(1, Math.min(Number(body.batchSize || 5), 10));
+      const thresholdHours = Math.max(1, Number(body.reviewAlertHours || 12));
+
+      const runId = `review-run-${Date.now()}`;
+      const runToken = `${runId}:${mode}:${batchSize}`;
+      const processedRevisionKeys = new Set();
+      const tasks = (await listTasks())
+        .filter((t) => t.status === 'review')
+        .sort((a, b) => new Date(a.updatedAt || a.createdAt) - new Date(b.updatedAt || b.createdAt))
+        .slice(0, batchSize);
+
+      const allEvents = await listEvents(5000);
+      const decisions = [];
+
+      for (const task of tasks) {
+        const taskEvents = allEvents.filter((e) => e.taskId === task.id);
+        const latestReviewEnterAt = taskEvents
+          .filter((e) => e.type === 'task_updated' && String(e.message || '').includes(`${task.id} -> review`))
+          .map((e) => e.at)
+          .sort((a, b) => new Date(b) - new Date(a))[0] || task.updatedAt;
+
+        const latestPackage = (task.notes || []).find((n) => hasCompletionPackageSections(n.note || '') && new Date(n.at || 0).getTime() >= new Date(latestReviewEnterAt || 0).getTime());
+        const revisionAnchor = `${task.updatedAt || ''}|${latestPackage?.at || 'no_package'}`;
+        const revisionKey = `${task.id}:${revisionAnchor}`;
+        if (processedRevisionKeys.has(revisionKey)) continue;
+        processedRevisionKeys.add(revisionKey);
+
+        const priorDecisionExists = taskEvents.some((e) => e.type === 'review_decision' && String(e.message || '').includes(`revision=${revisionKey}`));
+        if (priorDecisionExists) {
+          decisions.push({ task_id: task.id, prior_status: task.status, final_status: task.status, decision: 'skipped', reason_code: 'already_decided_for_revision', revision: revisionKey });
+          continue;
+        }
+
+        if (!latestPackage) {
+          const missing = COMPLETION_PACKAGE_HEADERS;
+          if (mode === 'apply') {
+            await updateTask({ id: task.id, status: 'assigned', owner: task.owner });
+            await addNote(task.id, `review_package_incomplete: missing=${missing.join(', ')}`, 'ultron');
+            await addEvent({ type: 'review_decision', message: `${runToken} ${task.id} review->assigned reason_code=review_package_incomplete revision=${revisionKey}`, taskId: task.id, actor: 'ultron' });
+            await addEvent({ type: 'task_updated', message: `${task.id} -> assigned (${task.owner})`, taskId: task.id, actor: 'ultron' });
+          }
+          decisions.push({ task_id: task.id, prior_status: 'review', final_status: mode === 'apply' ? 'assigned' : 'review', decision: mode === 'apply' ? 'reassigned' : 'would_reassign', reason_code: 'review_package_incomplete', missing_items: missing, revision: revisionKey });
+          continue;
+        }
+
+        const missing = getMissingCompletionPackageSections(latestPackage.note || '');
+        if (missing.length > 0) {
+          if (mode === 'apply') {
+            await updateTask({ id: task.id, status: 'assigned', owner: task.owner });
+            await addNote(task.id, `review_package_incomplete: missing=${missing.join(', ')}`, 'ultron');
+            await addEvent({ type: 'review_decision', message: `${runToken} ${task.id} review->assigned reason_code=review_package_incomplete revision=${revisionKey}`, taskId: task.id, actor: 'ultron' });
+            await addEvent({ type: 'task_updated', message: `${task.id} -> assigned (${task.owner})`, taskId: task.id, actor: 'ultron' });
+          }
+          decisions.push({ task_id: task.id, prior_status: 'review', final_status: mode === 'apply' ? 'assigned' : 'review', decision: mode === 'apply' ? 'reassigned' : 'would_reassign', reason_code: 'review_package_incomplete', missing_items: missing, revision: revisionKey });
+          continue;
+        }
+
+        if (mode === 'apply') {
+          await updateTask({ id: task.id, status: 'done', owner: task.owner });
+          await addEvent({ type: 'review_decision', message: `${runToken} ${task.id} review->done reason_code=review_approved revision=${revisionKey}`, taskId: task.id, actor: 'ultron' });
+          await addEvent({ type: 'task_updated', message: `${task.id} -> done (${task.owner})`, taskId: task.id, actor: 'ultron' });
+        }
+        decisions.push({ task_id: task.id, prior_status: 'review', final_status: mode === 'apply' ? 'done' : 'review', decision: mode === 'apply' ? 'approved' : 'would_approve', reason_code: 'review_approved', revision: revisionKey, package_at: latestPackage.at });
+      }
+
+      const reviewAgeThresholdMs = thresholdHours * 60 * 60 * 1000;
+      const allReview = (await listTasks()).filter((t) => t.status === 'review');
+      const overThreshold = allReview.filter((t) => (Date.now() - new Date(t.updatedAt || t.createdAt || 0).getTime()) > reviewAgeThresholdMs);
+
+      reviewRunTelemetry = {
+        run_id: runId,
+        mode,
+        review_decision_count_last_run: decisions.filter((d) => ['approved','reassigned'].includes(d.decision)).length,
+        reviewed_count_last_run: tasks.length,
+        generated_at: now()
+      };
+
+      return send(res, 200, {
+        ok: true,
+        run_id: runId,
+        run_token: runToken,
+        mode,
+        batch_size: batchSize,
+        reviewed_count: tasks.length,
+        review_decision_count_last_run: reviewRunTelemetry.review_decision_count_last_run,
+        review_over_threshold_count: overThreshold.length,
+        review_over_threshold_sample: overThreshold.slice(0, 10).map((t) => t.id),
+        decisions
+      });
+    }
+
     if (url.pathname === '/api/autopilot/board-health' && req.method === 'GET') {
       const [tenantTeam, agg] = await Promise.all([
         listTenantAgents(),
@@ -583,7 +685,14 @@ export const server = http.createServer(async (req, res) => {
         },
         stale_bins: agg.staleBins || { assigned_gt_24h: 0, in_progress_gt_8h: 0, review_gt_12h: 0 },
         review_pressure: reviewTotal > 3 ? 'high' : reviewTotal > 1 ? 'medium' : 'low',
-        wip_pressure: inProgressTotal > 4 ? 'high' : inProgressTotal > 2 ? 'medium' : 'low'
+        wip_pressure: inProgressTotal > 4 ? 'high' : inProgressTotal > 2 ? 'medium' : 'low',
+        review_loop: {
+          run_id: reviewRunTelemetry.run_id,
+          mode: reviewRunTelemetry.mode,
+          reviewed_count_last_run: reviewRunTelemetry.reviewed_count_last_run,
+          review_decision_count_last_run: reviewRunTelemetry.review_decision_count_last_run,
+          generated_at: reviewRunTelemetry.generated_at
+        }
       });
     }
 
@@ -1402,6 +1511,17 @@ export const server = http.createServer(async (req, res) => {
 
       const targetStatus = patch.status || existing.status;
       const targetOwner = patch.owner || existing.owner;
+      const actor = String(patch.actor || 'ui');
+
+      if (existing.status === 'review' && targetStatus === 'done' && actor !== 'ultron') {
+        await logEvent('task_transition_denied', `${patch.id} denied review->done by ${actor} (actor_not_allowed)`, patch.id, actor);
+        return send(res, 403, { error: 'actor_not_allowed', from: 'review', to: 'done', allowed: ['ultron'] });
+      }
+
+      if (existing.status === 'review' && targetStatus === 'assigned' && !['ultron','ops'].includes(actor)) {
+        await logEvent('task_transition_denied', `${patch.id} denied review->assigned by ${actor} (actor_not_allowed)`, patch.id, actor);
+        return send(res, 403, { error: 'actor_not_allowed', from: 'review', to: 'assigned', allowed: ['ultron','ops'] });
+      }
 
       if (targetStatus === 'inbox' && targetOwner !== 'ops') {
         await logEvent('task_transition_denied', `${patch.id} denied -> inbox with owner ${targetOwner} (must be ops)`, patch.id, patch.actor || 'ui');
