@@ -193,6 +193,8 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, {
         ok: true,
         migration_id: '20260308_001_pr1_inbox_ownership_invariant',
+        db_invariant: 'tasks_inbox_owner_must_be_ops_chk',
+        db_invariant_applied: proof.invariantApplied,
         query: proof.query,
         tenant_id: proof.tenantId,
         invalid_inbox_rows: proof.invalidInboxRows
