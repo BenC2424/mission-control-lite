@@ -226,6 +226,88 @@ function ensureIntentTagPrefix(title = '', tag = null) {
   return `[${tag}] ${cur}`;
 }
 
+const IN_PROGRESS_STALE_MINUTES = Math.max(1, Number(process.env.IN_PROGRESS_STALE_MINUTES || 60));
+const IN_PROGRESS_GRACE_CYCLES = Math.max(1, Number(process.env.IN_PROGRESS_GRACE_CYCLES || 1));
+const COMPLETION_PACKAGE_NOTE_RE = /(completion package|completion evidence|ready for review|pending review)/i;
+const PROGRESS_NOTE_RE = /(progress|working|update|started|implemented|investigat|blocked|next action|checkpoint)/i;
+
+async function evaluateInProgressStaleRecovery({ tasks, actor = 'autopilot', staleMinutes = IN_PROGRESS_STALE_MINUTES, graceCycles = IN_PROGRESS_GRACE_CYCLES }) {
+  const nowMs = Date.now();
+  const staleMs = staleMinutes * 60 * 1000;
+  const allEvents = await listEvents(1000);
+
+  let checkpointCount = 0;
+  let checkpointPendingCount = 0;
+  let recoveredCount = 0;
+  let skippedFreshCount = 0;
+  const checkpointSample = [];
+  const recoveredSample = [];
+
+  const inProgress = tasks.filter((t) => t.status === 'in_progress');
+  for (const t of inProgress) {
+    const notes = Array.isArray(t.notes) ? t.notes : [];
+    const nowIso = new Date(nowMs).toISOString();
+    const lastActivityAt = t.lastActivityAt || null;
+    const updatedAt = t.updatedAt || t.updated_at || null;
+    const lastActivityMs = lastActivityAt ? new Date(lastActivityAt).getTime() : 0;
+    const updatedMs = updatedAt ? new Date(updatedAt).getTime() : 0;
+
+    const checkpointNotes = notes
+      .filter((n) => String(n.note || '').includes('stale_checkpoint_pending'))
+      .map((n) => ({ at: n.at ? new Date(n.at).getTime() : 0, note: String(n.note || '') }))
+      .sort((a, b) => b.at - a.at);
+    const lastCheckpointMs = checkpointNotes[0]?.at || 0;
+    const checkpointCountSeen = checkpointNotes.length;
+
+    const completionFresh = notes.some((n) => {
+      const atMs = n.at ? new Date(n.at).getTime() : 0;
+      return COMPLETION_PACKAGE_NOTE_RE.test(String(n.note || '')) && (nowMs - atMs) <= staleMs;
+    });
+    if (completionFresh) { skippedFreshCount += 1; continue; }
+
+    const progressAfterCheckpoint = notes.some((n) => {
+      const atMs = n.at ? new Date(n.at).getTime() : 0;
+      return PROGRESS_NOTE_RE.test(String(n.note || '')) && atMs > Math.max(lastCheckpointMs, nowMs - staleMs);
+    });
+
+    const meaningfulEventAfterCheckpoint = allEvents.some((e) => {
+      if (e.taskId !== t.id) return false;
+      const atMs = new Date(e.at || 0).getTime();
+      if (atMs <= Math.max(lastCheckpointMs, nowMs - staleMs)) return false;
+      return ['task_note', 'task_started', 'task_completed', 'task_reviewed'].includes(String(e.type || ''));
+    });
+
+    const freshByLastActivity = lastActivityMs > (nowMs - staleMs);
+    const freshByUpdatedMeaningful = updatedMs > (nowMs - staleMs) && (progressAfterCheckpoint || meaningfulEventAfterCheckpoint);
+    const isFresh = progressAfterCheckpoint || freshByLastActivity || freshByUpdatedMeaningful;
+    if (isFresh) { skippedFreshCount += 1; continue; }
+
+    if (checkpointCountSeen < graceCycles) {
+      await addNote(t.id, 'stale_checkpoint_pending', actor);
+      await addEvent({ type: 'stale_checkpoint_pending', message: `${t.id} stale checkpoint pending`, taskId: t.id, actor });
+      checkpointCount += 1;
+      checkpointPendingCount += 1;
+      if (checkpointSample.length < 5) checkpointSample.push(t.id);
+      continue;
+    }
+
+    await updateTask({ id: t.id, status: 'assigned', owner: 'ops' });
+    await addNote(t.id, 'stalled_no_progress_update', actor);
+    await addEvent({ type: 'task_recovered', message: `${t.id} in_progress->assigned reason_code=stalled_no_progress_update`, taskId: t.id, actor });
+    recoveredCount += 1;
+    if (recoveredSample.length < 5) recoveredSample.push(t.id);
+  }
+
+  return {
+    in_progress_stale_checkpoint_count: checkpointCount,
+    in_progress_stale_checkpoint_pending_count: checkpointPendingCount,
+    in_progress_stale_recovered_count: recoveredCount,
+    in_progress_stale_skipped_fresh_count: skippedFreshCount,
+    in_progress_stale_checkpoint_sample_task_ids: checkpointSample,
+    in_progress_stale_recovered_sample_task_ids: recoveredSample
+  };
+}
+
 const DEFAULT_TENANT_ID = process.env.MCL_TENANT_ID || 'internal';
 const VALID_ROLES = new Set(['tenant_user', 'tenant_admin', 'tenant_ops', 'platform_admin']);
 
@@ -592,6 +674,8 @@ export const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/autopilot/stale-run' && req.method === 'POST') {
       const body = await parseBody(req);
       const startingTimeoutMinutes = Math.max(0, Number(body.startingTimeoutMinutes ?? 3));
+      const inProgressStaleMinutes = Math.max(1, Number(body.inProgressStaleMinutes ?? IN_PROGRESS_STALE_MINUTES));
+      const inProgressGraceCycles = Math.max(1, Number(body.inProgressGraceCycles ?? IN_PROGRESS_GRACE_CYCLES));
       let tasks = await listTasks();
       const cleanupCandidates = tasks.filter((t) => ['review','in_progress','starting'].includes(t.status) && isVerificationArtifactTask(t));
       const cleanupActions = [];
@@ -604,6 +688,19 @@ export const server = http.createServer(async (req, res) => {
         }
         if (cleanupActions.length > 0) tasks = await listTasks();
       }
+
+      const staleRecovery = READ_ONLY
+        ? {
+            in_progress_stale_checkpoint_count: 0,
+            in_progress_stale_checkpoint_pending_count: 0,
+            in_progress_stale_recovered_count: 0,
+            in_progress_stale_skipped_fresh_count: 0,
+            in_progress_stale_checkpoint_sample_task_ids: [],
+            in_progress_stale_recovered_sample_task_ids: []
+          }
+        : await evaluateInProgressStaleRecovery({ tasks, actor: 'autopilot', staleMinutes: inProgressStaleMinutes, graceCycles: inProgressGraceCycles });
+      if (!READ_ONLY) tasks = await listTasks();
+
       const nowMs = Date.now();
       const toMs = (v) => {
         const d = new Date(v || 0).getTime();
@@ -654,6 +751,12 @@ export const server = http.createServer(async (req, res) => {
         recommended_actions: recommendedActions,
         recovery_candidates: [...new Set(inProgressStale.map((t) => t.owner))],
         recovered,
+        in_progress_stale_checkpoint_count: staleRecovery.in_progress_stale_checkpoint_count,
+        in_progress_stale_checkpoint_pending_count: staleRecovery.in_progress_stale_checkpoint_pending_count,
+        in_progress_stale_recovered_count: staleRecovery.in_progress_stale_recovered_count,
+        in_progress_stale_skipped_fresh_count: staleRecovery.in_progress_stale_skipped_fresh_count,
+        in_progress_stale_checkpoint_sample_task_ids: staleRecovery.in_progress_stale_checkpoint_sample_task_ids,
+        in_progress_stale_recovered_sample_task_ids: staleRecovery.in_progress_stale_recovered_sample_task_ids,
         verification_artifact_cleanup_count: cleanupActions.length,
         verification_artifact_cleanup: cleanupActions
       };
@@ -1174,7 +1277,9 @@ export const server = http.createServer(async (req, res) => {
         }
       }
 
-      const normalizedSnapshot = await listTasks();
+      let normalizedSnapshot = await listTasks();
+      const staleRecovery = await evaluateInProgressStaleRecovery({ tasks: normalizedSnapshot, actor: 'supervisor' });
+      normalizedSnapshot = await listTasks();
       const normalizedAssigned = normalizedSnapshot.filter((t) => t.status === 'assigned');
 
       // Dispatch-probe heartbeat timing fix: probe only candidate workers then refresh heartbeat snapshot
@@ -1369,6 +1474,12 @@ export const server = http.createServer(async (req, res) => {
         auto_prefixed_triage_count: autoPrefixedTriageCount,
         auto_prefixed_test_count: autoPrefixedTestCount,
         auto_archived_test_count: autoArchivedTestCount,
+        in_progress_stale_checkpoint_count: staleRecovery.in_progress_stale_checkpoint_count,
+        in_progress_stale_checkpoint_pending_count: staleRecovery.in_progress_stale_checkpoint_pending_count,
+        in_progress_stale_recovered_count: staleRecovery.in_progress_stale_recovered_count,
+        in_progress_stale_skipped_fresh_count: staleRecovery.in_progress_stale_skipped_fresh_count,
+        in_progress_stale_checkpoint_sample_task_ids: staleRecovery.in_progress_stale_checkpoint_sample_task_ids,
+        in_progress_stale_recovered_sample_task_ids: staleRecovery.in_progress_stale_recovered_sample_task_ids,
         ranked_top_sample_task_ids: rankedTopSampleTaskIds,
         normalized_to_ops_missing_exec_sample_task_ids: normalizedToOpsMissingExecSample,
         normalized_to_ops_missing_gov_sample_task_ids: normalizedToOpsMissingGovSample,

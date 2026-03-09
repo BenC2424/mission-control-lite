@@ -1021,3 +1021,24 @@ test('normalization archives clearly inferred TEST verification artifacts', asyn
   assert.equal(row.status, 'archived');
   assert.equal(typeof run.auto_archived_test_count, 'number');
 });
+
+test('supervisor run includes in_progress stale recovery counters', async () => {
+  const run = await fetch(`${base}/api/contract/supervisor-run`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ maxClaims:2 })
+  }).then(r=>r.json());
+  assert.equal(typeof run.in_progress_stale_checkpoint_count, 'number');
+  assert.equal(typeof run.in_progress_stale_checkpoint_pending_count, 'number');
+  assert.equal(typeof run.in_progress_stale_recovered_count, 'number');
+  assert.equal(typeof run.in_progress_stale_skipped_fresh_count, 'number');
+});
+
+test('stale-run includes in_progress stale recovery counters', async () => {
+  const run = await fetch(`${base}/api/autopilot/stale-run`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ inProgressStaleMinutes: 60, inProgressGraceCycles: 1 })
+  }).then(r=>r.json());
+  assert.equal(typeof run.in_progress_stale_checkpoint_count, 'number');
+  assert.equal(typeof run.in_progress_stale_checkpoint_pending_count, 'number');
+  assert.equal(typeof run.in_progress_stale_recovered_count, 'number');
+  assert.equal(typeof run.in_progress_stale_skipped_fresh_count, 'number');
+});
