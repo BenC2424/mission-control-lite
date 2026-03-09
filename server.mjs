@@ -229,7 +229,22 @@ function ensureIntentTagPrefix(title = '', tag = null) {
 const IN_PROGRESS_STALE_MINUTES = Math.max(1, Number(process.env.IN_PROGRESS_STALE_MINUTES || 60));
 const IN_PROGRESS_GRACE_CYCLES = Math.max(1, Number(process.env.IN_PROGRESS_GRACE_CYCLES || 1));
 const COMPLETION_PACKAGE_NOTE_RE = /(completion package|completion evidence|ready for review|pending review)/i;
-const PROGRESS_NOTE_RE = /(progress|working|update|started|implemented|investigat|blocked|next action|checkpoint)/i;
+const WORKER_PROGRESS_NOTE_RE = /(progress step|worker progress|implemented|investigat|next action|execution progress)/i;
+const EXECUTION_ATTEMPT_MARKER_RE = /(execution_attempt_marker|resume_execution|worker_activity_marker)/i;
+
+function hasPostRecoveryExecutionMarker(task) {
+  const notes = Array.isArray(task.notes) ? task.notes : [];
+  const lastRecovery = notes
+    .filter((n) => String(n.note || '').includes('stalled_no_progress_update'))
+    .map((n) => new Date(n.at || 0).getTime())
+    .sort((a, b) => b - a)[0] || 0;
+  if (!lastRecovery) return true;
+  return notes.some((n) => {
+    const atMs = new Date(n.at || 0).getTime();
+    const txt = String(n.note || '');
+    return atMs > lastRecovery && (WORKER_PROGRESS_NOTE_RE.test(txt) || EXECUTION_ATTEMPT_MARKER_RE.test(txt) || COMPLETION_PACKAGE_NOTE_RE.test(txt));
+  });
+}
 
 async function evaluateInProgressStaleRecovery({ tasks, actor = 'autopilot', staleMinutes = IN_PROGRESS_STALE_MINUTES, graceCycles = IN_PROGRESS_GRACE_CYCLES }) {
   const nowMs = Date.now();
@@ -246,11 +261,7 @@ async function evaluateInProgressStaleRecovery({ tasks, actor = 'autopilot', sta
   const inProgress = tasks.filter((t) => t.status === 'in_progress');
   for (const t of inProgress) {
     const notes = Array.isArray(t.notes) ? t.notes : [];
-    const nowIso = new Date(nowMs).toISOString();
-    const lastActivityAt = t.lastActivityAt || null;
-    const updatedAt = t.updatedAt || t.updated_at || null;
-    const lastActivityMs = lastActivityAt ? new Date(lastActivityAt).getTime() : 0;
-    const updatedMs = updatedAt ? new Date(updatedAt).getTime() : 0;
+    const lastActivityMs = t.lastActivityAt ? new Date(t.lastActivityAt).getTime() : 0;
 
     const checkpointNotes = notes
       .filter((n) => String(n.note || '').includes('stale_checkpoint_pending'))
@@ -259,27 +270,32 @@ async function evaluateInProgressStaleRecovery({ tasks, actor = 'autopilot', sta
     const lastCheckpointMs = checkpointNotes[0]?.at || 0;
     const checkpointCountSeen = checkpointNotes.length;
 
+    const freshnessFloorMs = Math.max(lastCheckpointMs, nowMs - staleMs);
+
     const completionFresh = notes.some((n) => {
       const atMs = n.at ? new Date(n.at).getTime() : 0;
-      return COMPLETION_PACKAGE_NOTE_RE.test(String(n.note || '')) && (nowMs - atMs) <= staleMs;
+      return COMPLETION_PACKAGE_NOTE_RE.test(String(n.note || '')) && atMs > freshnessFloorMs;
     });
     if (completionFresh) { skippedFreshCount += 1; continue; }
 
-    const progressAfterCheckpoint = notes.some((n) => {
+    const workerProgressAfterCheckpoint = notes.some((n) => {
       const atMs = n.at ? new Date(n.at).getTime() : 0;
-      return PROGRESS_NOTE_RE.test(String(n.note || '')) && atMs > Math.max(lastCheckpointMs, nowMs - staleMs);
+      return atMs > freshnessFloorMs && WORKER_PROGRESS_NOTE_RE.test(String(n.note || ''));
     });
 
-    const meaningfulEventAfterCheckpoint = allEvents.some((e) => {
+    const workerActivityMarkerAfterCheckpoint = allEvents.some((e) => {
       if (e.taskId !== t.id) return false;
       const atMs = new Date(e.at || 0).getTime();
-      if (atMs <= Math.max(lastCheckpointMs, nowMs - staleMs)) return false;
-      return ['task_note', 'task_started', 'task_completed', 'task_reviewed'].includes(String(e.type || ''));
+      if (atMs <= freshnessFloorMs) return false;
+      const type = String(e.type || '');
+      const msg = String(e.message || '');
+      if (type === 'task_note' && EXECUTION_ATTEMPT_MARKER_RE.test(msg)) return true;
+      if (type === 'task_started') return true;
+      return false;
     });
 
-    const freshByLastActivity = lastActivityMs > (nowMs - staleMs);
-    const freshByUpdatedMeaningful = updatedMs > (nowMs - staleMs) && (progressAfterCheckpoint || meaningfulEventAfterCheckpoint);
-    const isFresh = progressAfterCheckpoint || freshByLastActivity || freshByUpdatedMeaningful;
+    const freshByLastActivity = lastActivityMs > (nowMs - staleMs) && (workerProgressAfterCheckpoint || workerActivityMarkerAfterCheckpoint);
+    const isFresh = workerProgressAfterCheckpoint || completionFresh || workerActivityMarkerAfterCheckpoint || freshByLastActivity;
     if (isFresh) { skippedFreshCount += 1; continue; }
 
     if (checkpointCountSeen < graceCycles) {
@@ -1368,6 +1384,11 @@ export const server = http.createServer(async (req, res) => {
           skipped.push({ task_id: task.id, reason: 'recent_worker_start_timeout', owner: task.owner });
           continue;
         }
+        if (!hasPostRecoveryExecutionMarker(task)) {
+          skippedNotExecutionReadyCount += 1;
+          skipped.push({ task_id: task.id, reason: 'recovery_cooldown_no_worker_progress', owner: task.owner });
+          continue;
+        }
 
         const intent = classifyAssignedIntent(task).intent;
         if (intent === 'governance' || intent === 'triage' || intent === 'test') {
@@ -1425,6 +1446,11 @@ export const server = http.createServer(async (req, res) => {
         if (recentStartTimeoutTaskIds.has(t.id)) {
           skippedRecentStartTimeoutCount += 1;
           skipped.push({ task_id: t.id, reason: 'recent_worker_start_timeout', owner: t.owner });
+          continue;
+        }
+        if (!hasPostRecoveryExecutionMarker(t)) {
+          skippedNotExecutionReadyCount += 1;
+          skipped.push({ task_id: t.id, reason: 'recovery_cooldown_no_worker_progress', owner: t.owner });
           continue;
         }
         filteredWorkerAssigned.push(t);
