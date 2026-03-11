@@ -228,9 +228,15 @@ function ensureIntentTagPrefix(title = '', tag = null) {
 
 const IN_PROGRESS_STALE_MINUTES = Math.max(1, Number(process.env.IN_PROGRESS_STALE_MINUTES || 60));
 const IN_PROGRESS_GRACE_CYCLES = Math.max(1, Number(process.env.IN_PROGRESS_GRACE_CYCLES || 1));
+const RECOVERY_AUTO_RETRY_LIMIT = Math.max(1, Number(process.env.RECOVERY_AUTO_RETRY_LIMIT || 3));
 const COMPLETION_PACKAGE_NOTE_RE = /(completion package|completion evidence|ready for review|pending review)/i;
 const WORKER_PROGRESS_NOTE_RE = /(progress step|worker progress|implemented|investigat|next action|execution progress)/i;
 const EXECUTION_ATTEMPT_MARKER_RE = /(execution_attempt_marker|resume_execution|worker_activity_marker)/i;
+
+function recoveryAttemptCount(task) {
+  const notes = Array.isArray(task?.notes) ? task.notes : [];
+  return notes.filter((n) => String(n.note || '').includes('stalled_no_progress_update')).length;
+}
 
 function hasPostRecoveryExecutionMarker(task) {
   const notes = Array.isArray(task.notes) ? task.notes : [];
@@ -238,7 +244,13 @@ function hasPostRecoveryExecutionMarker(task) {
     .filter((n) => String(n.note || '').includes('stalled_no_progress_update'))
     .map((n) => new Date(n.at || 0).getTime())
     .sort((a, b) => b - a)[0] || 0;
+
+  // New policy: allow a bounded number of automatic retries after recovery
+  // even when a worker progress marker has not landed yet.
+  const recoveries = recoveryAttemptCount(task);
+  if (lastRecovery && recoveries <= RECOVERY_AUTO_RETRY_LIMIT) return true;
   if (!lastRecovery) return true;
+
   return notes.some((n) => {
     const atMs = new Date(n.at || 0).getTime();
     const txt = String(n.note || '');
@@ -1385,6 +1397,14 @@ export const server = http.createServer(async (req, res) => {
           continue;
         }
         if (!hasPostRecoveryExecutionMarker(task)) {
+          const recoveryAttempts = recoveryAttemptCount(task);
+          if (recoveryAttempts > RECOVERY_AUTO_RETRY_LIMIT) {
+            await updateTask({ id: task.id, status: 'review', owner: 'ops' });
+            await addNote(task.id, `recovery_retry_limit_exceeded:${recoveryAttempts}`, 'supervisor');
+            await addEvent({ type: 'task_escalated', message: `${task.id} assigned->review reason_code=recovery_retry_limit_exceeded attempts=${recoveryAttempts}`, taskId: task.id, actor: 'supervisor' });
+            skipped.push({ task_id: task.id, reason: 'recovery_retry_limit_exceeded', owner: task.owner, attempts: recoveryAttempts, limit: RECOVERY_AUTO_RETRY_LIMIT });
+            continue;
+          }
           skippedNotExecutionReadyCount += 1;
           skipped.push({ task_id: task.id, reason: 'recovery_cooldown_no_worker_progress', owner: task.owner });
           continue;
@@ -1449,6 +1469,14 @@ export const server = http.createServer(async (req, res) => {
           continue;
         }
         if (!hasPostRecoveryExecutionMarker(t)) {
+          const recoveryAttempts = recoveryAttemptCount(t);
+          if (recoveryAttempts > RECOVERY_AUTO_RETRY_LIMIT) {
+            await updateTask({ id: t.id, status: 'review', owner: 'ops' });
+            await addNote(t.id, `recovery_retry_limit_exceeded:${recoveryAttempts}`, 'supervisor');
+            await addEvent({ type: 'task_escalated', message: `${t.id} assigned->review reason_code=recovery_retry_limit_exceeded attempts=${recoveryAttempts}`, taskId: t.id, actor: 'supervisor' });
+            skipped.push({ task_id: t.id, reason: 'recovery_retry_limit_exceeded', owner: t.owner, attempts: recoveryAttempts, limit: RECOVERY_AUTO_RETRY_LIMIT });
+            continue;
+          }
           skippedNotExecutionReadyCount += 1;
           skipped.push({ task_id: t.id, reason: 'recovery_cooldown_no_worker_progress', owner: t.owner });
           continue;
