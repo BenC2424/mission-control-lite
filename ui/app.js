@@ -120,11 +120,7 @@ async function loadCoreData() {
   const optional = await Promise.allSettled([
     apiTimed('/api/metrics'),
     apiTimed('/api/escalations'),
-    apiTimed('/api/orchestration/templates'),
-    apiTimed('/api/kpi/dashboard', {
-      method: 'POST',
-      body: JSON.stringify({ current: {}, baseline: {} })
-    })
+    apiTimed('/api/orchestration/templates')
   ]);
 
   cachedTasks = t.data.tasks ?? [];
@@ -138,7 +134,7 @@ async function loadCoreData() {
 
   escalations = optional[1].status === 'fulfilled' ? (optional[1].value.data.items || []) : [];
   orchestraTemplates = optional[2].status === 'fulfilled' ? (optional[2].value.data.templates || []) : [];
-  kpiDashboard = optional[3].status === 'fulfilled' ? (optional[3].value.data.dashboard || null) : null;
+  kpiDashboard = metrics?.dashboard || metrics?.kpiDashboard || null;
 
   return {
     tasksMs: t.ms,
