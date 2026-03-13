@@ -335,9 +335,30 @@ export const server = http.createServer(async (req, res) => {
       const validation = validateTaskUpdate(patch);
       if (!validation.ok) return send(res, 400, { error: 'validation_failed', details: validation.errors });
 
+      const targetStatus = patch.status;
+      if (targetStatus === 'in_progress') {
+        const tasksNow = await listTasks();
+        const current = tasksNow.find((x) => x.id === patch.id);
+        if (!current) return send(res, 404, { error: 'task not found' });
+
+        const actor = String(patch.actor || patch.owner || current.owner || '');
+        const events = await listEvents(500);
+        const related = events.filter((e) => e.taskId === patch.id);
+        const hasClaim = related.some((e) => e.type === 'worker_claimed_task' && (!actor || e.actor === actor));
+        const hasProgress = related.some((e) => e.type === 'worker_first_progress' && (!actor || e.actor === actor));
+
+        // starting -> in_progress must be backed by claim or first task-bound progress evidence.
+        if (current.status === 'starting' && !hasClaim && !hasProgress) {
+          return send(res, 409, {
+            error: 'promotion_blocked',
+            details: ['starting->in_progress requires worker_claimed_task or worker_first_progress']
+          });
+        }
+      }
+
       const t = await updateTask({
         id: patch.id,
-        status: patch.status,
+        status: targetStatus,
         owner: patch.owner,
         priority: patch.priority && VALID_PRIORITY.includes(patch.priority) ? patch.priority : undefined
       });
