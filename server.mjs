@@ -17,6 +17,7 @@ import {
   addNote,
   addEvent,
   assignTask,
+  reassignTask,
   isTaskAssignedToAgent,
   hasWorkerStartAck,
   recordTaskStartAck,
@@ -2358,7 +2359,7 @@ export const server = http.createServer(async (req, res) => {
 
       const updatedIntentTag = parseIntentTag(existing.title || '');
       if (updatedIntentTag === 'EXEC' && t.status === 'assigned' && t.owner && t.owner !== 'ops' && t.owner !== 'ultron') {
-        await assignTask(t.id, t.owner);
+        await reassignTask(t.id, t.owner);
         await addEvent({ type: 'exec_auto_assigned', message: `${t.id} auto-assigned to ${t.owner} on update`, taskId: t.id, actor: patch.actor || 'autopilot' });
       }
 
