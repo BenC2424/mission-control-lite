@@ -228,6 +228,7 @@ function ensureIntentTagPrefix(title = '', tag = null) {
 
 const IN_PROGRESS_STALE_MINUTES = Math.max(1, Number(process.env.IN_PROGRESS_STALE_MINUTES || 60));
 const IN_PROGRESS_GRACE_CYCLES = Math.max(1, Number(process.env.IN_PROGRESS_GRACE_CYCLES || 1));
+const IN_PROGRESS_NOTE_GUARD_MINUTES = Math.max(1, Number(process.env.IN_PROGRESS_NOTE_GUARD_MINUTES || 5));
 const RECOVERY_AUTO_RETRY_LIMIT = Math.max(1, Number(process.env.RECOVERY_AUTO_RETRY_LIMIT || 3));
 const COMPLETION_PACKAGE_NOTE_RE = /(completion package|completion evidence|ready for review|pending review)/i;
 const WORKER_PROGRESS_NOTE_RE = /(progress step|worker progress|implemented|investigat|next action|execution progress)/i;
@@ -267,6 +268,7 @@ async function evaluateInProgressStaleRecovery({ tasks, actor = 'autopilot', sta
   let checkpointPendingCount = 0;
   let recoveredCount = 0;
   let skippedFreshCount = 0;
+  let zombieRiskCount = 0;
   const checkpointSample = [];
   const recoveredSample = [];
 
@@ -288,7 +290,6 @@ async function evaluateInProgressStaleRecovery({ tasks, actor = 'autopilot', sta
       const atMs = n.at ? new Date(n.at).getTime() : 0;
       return COMPLETION_PACKAGE_NOTE_RE.test(String(n.note || '')) && atMs > freshnessFloorMs;
     });
-    if (completionFresh) { skippedFreshCount += 1; continue; }
 
     const workerProgressAfterCheckpoint = notes.some((n) => {
       const atMs = n.at ? new Date(n.at).getTime() : 0;
@@ -305,6 +306,16 @@ async function evaluateInProgressStaleRecovery({ tasks, actor = 'autopilot', sta
       if (type === 'task_started') return true;
       return false;
     });
+
+    const noteGuardMs = IN_PROGRESS_NOTE_GUARD_MINUTES * 60 * 1000;
+    const inProgressLongEnough = lastActivityMs > 0 && (nowMs - lastActivityMs) > noteGuardMs;
+    const hasZombieRiskFlag = notes.some((n) => String(n.note || '').includes('ZOMBIE_WIP_RISK'));
+    const hasTaskSpecificEvidence = workerProgressAfterCheckpoint || completionFresh || workerActivityMarkerAfterCheckpoint;
+    if (inProgressLongEnough && !hasTaskSpecificEvidence && !hasZombieRiskFlag) {
+      await addNote(t.id, `ZOMBIE_WIP_RISK missing_progress_note_within_${IN_PROGRESS_NOTE_GUARD_MINUTES}m`, actor);
+      await addEvent({ type: 'zombie_wip_risk', message: `${t.id} missing task-specific progress note within ${IN_PROGRESS_NOTE_GUARD_MINUTES}m`, taskId: t.id, actor });
+      zombieRiskCount += 1;
+    }
 
     const freshByLastActivity = lastActivityMs > (nowMs - staleMs) && (workerProgressAfterCheckpoint || workerActivityMarkerAfterCheckpoint);
     const isFresh = workerProgressAfterCheckpoint || completionFresh || workerActivityMarkerAfterCheckpoint || freshByLastActivity;
@@ -332,7 +343,8 @@ async function evaluateInProgressStaleRecovery({ tasks, actor = 'autopilot', sta
     in_progress_stale_recovered_count: recoveredCount,
     in_progress_stale_skipped_fresh_count: skippedFreshCount,
     in_progress_stale_checkpoint_sample_task_ids: checkpointSample,
-    in_progress_stale_recovered_sample_task_ids: recoveredSample
+    in_progress_stale_recovered_sample_task_ids: recoveredSample,
+    zombie_wip_risk_count: zombieRiskCount
   };
 }
 
