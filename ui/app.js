@@ -14,7 +14,7 @@ let kpiDashboard = null;
 let selectedId = null;
 let draggedTaskId = null;
 
-const filters = { owner: 'all', status: 'all', priority: 'all', search: '', showArchived: false };
+const filters = { owner: 'all', status: 'all', priority: 'all', search: '', showArchived: false, onlyStaleWip: false };
 let feedType = 'all';
 let feedLimit = 25;
 
@@ -106,11 +106,15 @@ async function loadData() {
 
 function filteredTasks() {
   const query = filters.search.trim().toLowerCase();
+  const staleWipIds = new Set((escalations || [])
+    .filter((e) => e.reason === 'wip_no_evidence_stale')
+    .map((e) => e.taskId));
   return cachedTasks.filter((t) =>
     (filters.showArchived || t.status !== 'archived') &&
     (filters.owner === 'all' || t.owner === filters.owner) &&
     (filters.status === 'all' || t.status === filters.status) &&
     (filters.priority === 'all' || t.priority === filters.priority) &&
+    (!filters.onlyStaleWip || staleWipIds.has(t.id)) &&
     (!query || t.title.toLowerCase().includes(query) || t.id.toLowerCase().includes(query))
   );
 }
@@ -301,6 +305,7 @@ $('filterStatus').onchange = (e) => { filters.status = e.target.value; renderBoa
 $('filterPriority').onchange = (e) => { filters.priority = e.target.value; renderBoard(); renderMetrics(); };
 $('filterSearch').oninput = (e) => { filters.search = e.target.value; renderBoard(); renderMetrics(); };
 $('showArchived').onchange = (e) => { filters.showArchived = Boolean(e.target.checked); renderBoard(); renderMetrics(); };
+$('onlyStaleWip').onchange = (e) => { filters.onlyStaleWip = Boolean(e.target.checked); renderBoard(); renderMetrics(); };
 $('feedType').onchange = (e) => { feedType = e.target.value; renderFeed(); };
 $('feedLimit').onchange = (e) => { feedLimit = Number(e.target.value || 25); renderFeed(); };
 
