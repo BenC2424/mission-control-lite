@@ -347,11 +347,12 @@ export const server = http.createServer(async (req, res) => {
         const hasClaim = related.some((e) => e.type === 'worker_claimed_task' && (!actor || e.actor === actor));
         const hasProgress = related.some((e) => e.type === 'worker_first_progress' && (!actor || e.actor === actor));
 
-        // starting -> in_progress must be backed by claim or first task-bound progress evidence.
-        if (current.status === 'starting' && !hasClaim && !hasProgress) {
+        // Any transition into in_progress must be backed by claim or first task-bound progress evidence.
+        // This blocks control-plane-only promotions from assigned/starting/other pre-states.
+        if (current.status !== 'in_progress' && !hasClaim && !hasProgress) {
           return send(res, 409, {
             error: 'promotion_blocked',
-            details: ['starting->in_progress requires worker_claimed_task or worker_first_progress']
+            details: ['transition->in_progress requires worker_claimed_task or worker_first_progress']
           });
         }
       }
