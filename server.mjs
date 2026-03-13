@@ -140,7 +140,10 @@ export const server = http.createServer(async (req, res) => {
       const task = await claimNext(agentId);
       const summary = task ? `claimed ${task.id}` : 'no_actionable_tasks';
       await recordHeartbeat(agentId, 'ok', summary);
-      if (task) await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
+      if (task) {
+        await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
+        await addEvent({ type: 'worker_claimed_task', message: `${agentId} accepted task payload for ${task.id}`, taskId: task.id, actor: agentId });
+      }
       return send(res, 200, { ok: true, agentId, task, inboxCount: (await agentInbox(agentId)).length });
     }
 
@@ -150,6 +153,7 @@ export const server = http.createServer(async (req, res) => {
       const task = await claimNext(agentId);
       if (!task) return send(res, 200, { ok: true, task: null });
       await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
+      await addEvent({ type: 'worker_claimed_task', message: `${agentId} accepted task payload for ${task.id}`, taskId: task.id, actor: agentId });
       return send(res, 200, { ok: true, task });
     }
 
@@ -157,6 +161,22 @@ export const server = http.createServer(async (req, res) => {
       const body = await parseBody(req);
       if (!body.agentId) return send(res, 400, { error: 'validation_failed', details: ['agentId is required'] });
       await recordHeartbeat(body.agentId, body.status || 'ok', body.summary || '');
+      return send(res, 200, { ok: true });
+    }
+
+    if (url.pathname === '/api/worker/event' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const body = await parseBody(req);
+      if (!body.taskId || !body.agentId || !body.type) {
+        return send(res, 400, { error: 'validation_failed', details: ['taskId, agentId, and type are required'] });
+      }
+      const type = String(body.type);
+      const allowed = new Set(['worker_claimed_task', 'worker_first_progress', 'worker_progress_heartbeat', 'worker_run_ended']);
+      if (!allowed.has(type)) {
+        return send(res, 400, { error: 'validation_failed', details: ['unsupported worker event type'] });
+      }
+      await addEvent({ type, taskId: body.taskId, actor: body.agentId, message: body.message || `${body.agentId} ${type} ${body.taskId}` });
+      if (body.note) await addNote(body.taskId, String(body.note), body.agentId);
       return send(res, 200, { ok: true });
     }
 
@@ -248,8 +268,17 @@ export const server = http.createServer(async (req, res) => {
       const body = await parseBody(req);
       const existing = (await listTasks()).find((x) => x.id === body.id);
       if (!existing) return send(res, 404, { error: 'task not found' });
-      await addNote(body.id, body.note || '', body.actor || 'ui');
-      await logEvent('task_note', `${body.id}: ${body.note || ''}`, body.id, body.actor || 'ui');
+      const actor = body.actor || 'ui';
+      await addNote(body.id, body.note || '', actor);
+      await logEvent('task_note', `${body.id}: ${body.note || ''}`, body.id, actor);
+      if (['codi', 'scout'].includes(String(actor)) && String(body.note || '').trim()) {
+        await addEvent({
+          type: 'worker_first_progress',
+          message: `${actor} posted first progress evidence for ${body.id}`,
+          taskId: body.id,
+          actor
+        });
+      }
       return send(res, 200, { ok: true });
     }
 
