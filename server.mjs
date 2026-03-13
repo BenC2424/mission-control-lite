@@ -2199,10 +2199,42 @@ export const server = http.createServer(async (req, res) => {
         createdAt: now(),
         updatedAt: now()
       };
-      await createTask(task);
-      await logEvent('task_created', `${task.owner} created ${task.id}: ${task.title}`, task.id, task.owner);
-      await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId: task.owner, eventType: 'task_execution', taskId: task.id, tokensUsed: 50, computeMs: 100 });
-      return send(res, 200, { ok: true, task });
+
+      let nextTask = { ...task };
+      const taskIntentTag = parseIntentTag(nextTask.title || '');
+      if (taskIntentTag === 'EXEC') {
+        const tenantAgents = await listTenantAgents();
+        const workers = tenantAgents
+          .map((a) => a.agentId)
+          .filter((id) => id !== 'ultron' && id !== 'ops');
+
+        let assignedWorker = workers.includes(nextTask.owner) ? nextTask.owner : null;
+        if (!assignedWorker && workers.length > 0) {
+          const ranked = [];
+          for (const w of workers) {
+            const inProgress = await countTasksByOwnerAndStatus(w, 'in_progress');
+            const assigned = await countTasksByOwnerAndStatus(w, 'assigned');
+            ranked.push({ w, inProgress, assigned });
+          }
+          ranked.sort((a, b) => a.inProgress - b.inProgress || a.assigned - b.assigned || a.w.localeCompare(b.w));
+          assignedWorker = ranked[0]?.w || workers[0];
+        }
+
+        if (assignedWorker) {
+          nextTask.owner = assignedWorker;
+          nextTask.status = 'assigned';
+        }
+      }
+
+      await createTask(nextTask);
+      if (taskIntentTag === 'EXEC' && nextTask.status === 'assigned' && nextTask.owner && nextTask.owner !== 'ops' && nextTask.owner !== 'ultron') {
+        await assignTask(nextTask.id, nextTask.owner);
+        await addEvent({ type: 'exec_auto_assigned', message: `${nextTask.id} auto-assigned to ${nextTask.owner} on create`, taskId: nextTask.id, actor: body.actor || 'autopilot' });
+      }
+
+      await logEvent('task_created', `${nextTask.owner} created ${nextTask.id}: ${nextTask.title}`, nextTask.id, nextTask.owner);
+      await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId: nextTask.owner, eventType: 'task_execution', taskId: nextTask.id, tokensUsed: 50, computeMs: 100 });
+      return send(res, 200, { ok: true, task: nextTask });
     }
 
     if (url.pathname === '/api/task/update' && req.method === 'POST') {
