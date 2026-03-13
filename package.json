@@ -14,6 +14,7 @@
     "wake:scout": "node scripts/agent-wake.mjs scout",
     "healthcheck": "node scripts/healthcheck.mjs",
     "validate:heartbeat": "node scripts/validate-heartbeat-loop.mjs",
-    "watchdog": "node scripts/heartbeat-watchdog.mjs"
+    "watchdog": "node scripts/heartbeat-watchdog.mjs",
+    "watchdog:run": "node scripts/watchdog-run.mjs"
   }
 }
