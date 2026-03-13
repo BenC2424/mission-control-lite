@@ -254,7 +254,7 @@ function renderMetrics() {
   const total = Number(a.totalAssignments || 0);
   const completed = Number(a.completedAssignments || 0);
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
-  $('assignmentHealth').textContent = `assignment health: ${completed}/${total} completed (${pct}%) • in-flight ${a.inFlightAssignments || 0}`;
+  $('assignmentHealth').textContent = `assignment health: ${completed}/${total} completed (${pct}%) • in-flight ${a.inFlightAssignments || 0} • stale-wip ${metrics?.staleWipCount || 0}`;
 }
 
 function openDrawer(id) {
