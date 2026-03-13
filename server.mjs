@@ -2356,6 +2356,12 @@ export const server = http.createServer(async (req, res) => {
         priority: patch.priority && VALID_PRIORITY.includes(patch.priority) ? patch.priority : undefined
       });
 
+      const updatedIntentTag = parseIntentTag(existing.title || '');
+      if (updatedIntentTag === 'EXEC' && t.status === 'assigned' && t.owner && t.owner !== 'ops' && t.owner !== 'ultron') {
+        await assignTask(t.id, t.owner);
+        await addEvent({ type: 'exec_auto_assigned', message: `${t.id} auto-assigned to ${t.owner} on update`, taskId: t.id, actor: patch.actor || 'autopilot' });
+      }
+
       await logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`, t.id, patch.actor || 'ui');
       await recordUsageEvent({ tenantId: accessCtx.tenantId, agentId: t.owner, eventType: t.status === 'done' ? 'task_completed' : 'task_execution', taskId: t.id, tokensUsed: 25, computeMs: 60 });
       return send(res, 200, { ok: true, task: {
