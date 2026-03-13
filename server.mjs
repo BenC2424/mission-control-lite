@@ -39,6 +39,8 @@ import {
   createWeeklyReportRecord,
   listTenantAgents,
   addTenantAgent,
+  getTaskAssignmentsDebug,
+  getTaskCoreDebug,
   getTeamTemplate,
   listTeamTemplates,
   upsertTenantTeam,
@@ -447,6 +449,24 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ...payload, agents });
     }
     if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, { version: 1, events: await listEvents(300) });
+
+    if (url.pathname === '/api/debug/task-assignments' && req.method === 'GET') {
+      const ids = String(url.searchParams.get('taskIds') || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const rows = await getTaskAssignmentsDebug(ids);
+      return send(res, 200, { rows });
+    }
+
+    if (url.pathname === '/api/debug/task-core' && req.method === 'GET') {
+      const ids = String(url.searchParams.get('taskIds') || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const rows = await getTaskCoreDebug(ids);
+      return send(res, 200, { rows });
+    }
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/inbox') && req.method === 'GET') {
       const agentId = url.pathname.split('/')[3];
