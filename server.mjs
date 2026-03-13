@@ -20,6 +20,9 @@ import {
   claimNext,
   recordHeartbeat,
   resetAssignmentClaim,
+  openExecutionLease,
+  getActiveExecutionLease,
+  closeExecutionLease,
   getMetrics,
   getEscalations,
   clearAllData
@@ -38,8 +41,7 @@ const paths = {
   tasks: join(__dirname, 'runtime', 'tasks.json'),
   agents: join(__dirname, 'config', 'agents.json'),
   standup: join(__dirname, 'runtime', 'standup-latest.md'),
-  activity: join(__dirname, 'runtime', 'activity.json'),
-  leases: join(__dirname, 'runtime', 'execution-leases.json')
+  activity: join(__dirname, 'runtime', 'activity.json')
 };
 
 const mime = {
@@ -55,47 +57,6 @@ const writeJson = (p, v) => writeFileSync(p, JSON.stringify(v, null, 2) + '\n');
 const now = () => new Date().toISOString();
 await seedFromJsonIfEmpty();
 
-let leaseState = { version: 1, leases: {} };
-let leasePersistenceEnabled = true;
-try {
-  if (existsSync(paths.leases)) {
-    leaseState = readJson(paths.leases);
-  } else {
-    writeJson(paths.leases, leaseState);
-  }
-} catch {
-  // Serverless/read-only filesystems cannot persist runtime state.
-  // Fallback to in-memory lease store for process lifetime.
-  leasePersistenceEnabled = false;
-}
-
-function persistLeases() {
-  if (!leasePersistenceEnabled) return;
-  try {
-    writeJson(paths.leases, leaseState);
-  } catch {
-    leasePersistenceEnabled = false;
-  }
-}
-
-function openLease(taskId, agentId) {
-  const runId = `run-${randomUUID().slice(0, 12)}`;
-  leaseState.leases[taskId] = { runId, agentId, status: 'active', openedAt: now(), closedAt: null };
-  persistLeases();
-  return leaseState.leases[taskId];
-}
-function closeLease(taskId, reason = 'closed') {
-  const lease = leaseState.leases[taskId];
-  if (!lease || lease.status !== 'active') return null;
-  lease.status = reason;
-  lease.closedAt = now();
-  persistLeases();
-  return lease;
-}
-function activeLease(taskId) {
-  const lease = leaseState.leases[taskId];
-  return lease && lease.status === 'active' ? lease : null;
-}
 
 function send(res, status, body, type = 'application/json; charset=utf-8') {
   res.writeHead(status, { 'Content-Type': type, 'Access-Control-Allow-Origin': '*' });
@@ -179,7 +140,7 @@ async function runWatchdogPass(actor = 'watchdog') {
 
     await updateTask({ id: t.id, status: 'assigned', owner: t.owner });
     await resetAssignmentClaim(t.id, t.owner);
-    closeLease(t.id, 'recovered');
+    await closeExecutionLease(t.id, 'recovered');
     await addEvent({
       type: 'worker_run_ended',
       message: `${actor} recovered stale in_progress ${t.id} back to assigned`,
@@ -265,10 +226,11 @@ export const server = http.createServer(async (req, res) => {
       const summary = task ? `claimed ${task.id}` : 'no_actionable_tasks';
       await recordHeartbeat(agentId, 'ok', summary);
       if (task) {
-        const lease = openLease(task.id, agentId);
-        await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id} run_id=${lease.runId}`, taskId: task.id, actor: agentId });
-        await addEvent({ type: 'worker_claimed_task', message: `${agentId} accepted task payload for ${task.id} run_id=${lease.runId}`, taskId: task.id, actor: agentId });
-        task.runId = lease.runId;
+        const runId = `run-${randomUUID().slice(0, 12)}`;
+        await openExecutionLease(task.id, runId, agentId);
+        await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id} run_id=${runId}`, taskId: task.id, actor: agentId });
+        await addEvent({ type: 'worker_claimed_task', message: `${agentId} accepted task payload for ${task.id} run_id=${runId}`, taskId: task.id, actor: agentId });
+        task.runId = runId;
       }
       return send(res, 200, { ok: true, agentId, task, inboxCount: (await agentInbox(agentId)).length });
     }
@@ -278,10 +240,11 @@ export const server = http.createServer(async (req, res) => {
       const agentId = url.pathname.split('/')[3];
       const task = await claimNext(agentId);
       if (!task) return send(res, 200, { ok: true, task: null });
-      const lease = openLease(task.id, agentId);
-      await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id} run_id=${lease.runId}`, taskId: task.id, actor: agentId });
-      await addEvent({ type: 'worker_claimed_task', message: `${agentId} accepted task payload for ${task.id} run_id=${lease.runId}`, taskId: task.id, actor: agentId });
-      return send(res, 200, { ok: true, task: { ...task, runId: lease.runId } });
+      const runId = `run-${randomUUID().slice(0, 12)}`;
+      await openExecutionLease(task.id, runId, agentId);
+      await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id} run_id=${runId}`, taskId: task.id, actor: agentId });
+      await addEvent({ type: 'worker_claimed_task', message: `${agentId} accepted task payload for ${task.id} run_id=${runId}`, taskId: task.id, actor: agentId });
+      return send(res, 200, { ok: true, task: { ...task, runId } });
     }
 
     if (url.pathname === '/api/heartbeat/run' && req.method === 'POST') {
@@ -303,7 +266,7 @@ export const server = http.createServer(async (req, res) => {
         return send(res, 400, { error: 'validation_failed', details: ['unsupported worker event type'] });
       }
 
-      const lease = activeLease(body.taskId);
+      const lease = await getActiveExecutionLease(body.taskId);
       if (!body.runId) {
         return send(res, 409, { error: 'run_id_required', details: ['runId is required for worker events'] });
       }
@@ -427,7 +390,7 @@ export const server = http.createServer(async (req, res) => {
       });
       if (!t) return send(res, 404, { error: 'task not found' });
 
-      if (['done','archived'].includes(String(t.status))) closeLease(t.id, 'completed');
+      if (['done','archived'].includes(String(t.status))) await closeExecutionLease(t.id, 'completed');
       await logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`, t.id, patch.actor || 'ui');
       return send(res, 200, { ok: true, task: {
         id: t.id, title: t.title, status: t.status, priority: t.priority, owner: t.owner, updatedAt: t.updated_at
@@ -443,7 +406,7 @@ export const server = http.createServer(async (req, res) => {
       await addNote(body.id, body.note || '', actor);
       await logEvent('task_note', `${body.id}: ${body.note || ''}`, body.id, actor);
       if (['codi', 'scout'].includes(String(actor)) && String(body.note || '').trim()) {
-        const lease = activeLease(body.id);
+        const lease = await getActiveExecutionLease(body.id);
         if (lease && lease.agentId === actor) {
           await addEvent({
             type: 'worker_first_progress',
