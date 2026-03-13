@@ -172,10 +172,6 @@ function renderFeed() {
 }
 
 function renderMode() {
-  const badge = $('readonlyBadge');
-  if (readOnly) badge.classList.remove('hidden');
-  else badge.classList.add('hidden');
-
   ['newTaskBtn','saveTask','assignTask','runOrchestra','deleteTask','saveNote','createTask','standupBtn','archiveDoneBtn','importBtn','wakeCodiBtn','wakeScoutBtn'].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = readOnly;
