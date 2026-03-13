@@ -32,6 +32,7 @@ const PORT = Number(process.env.PORT || 8787);
 const READ_ONLY = process.env.READ_ONLY === '1';
 const WIP_STALE_MINUTES = Number(process.env.MCL_WIP_STALE_MINUTES || 15);
 const WIP_RECOVERY_GRACE_MINUTES = Number(process.env.MCL_WIP_RECOVERY_GRACE_MINUTES || 5);
+const WATCHDOG_INTERVAL_MS = Number(process.env.MCL_WATCHDOG_INTERVAL_MS || 0);
 
 const paths = {
   tasks: join(__dirname, 'runtime', 'tasks.json'),
@@ -76,6 +77,78 @@ function parseBody(req) {
 
 async function logEvent(type, message, taskId = null, actor = 'system') {
   await addEvent({ type, message, taskId, actor });
+}
+
+async function runWatchdogPass(actor = 'watchdog') {
+  const tasks = await listTasks();
+  const events = await listEvents(2000);
+  const nowMs = Date.now();
+  const staleCutoffMs = WIP_STALE_MINUTES * 60 * 1000;
+  const graceMs = WIP_RECOVERY_GRACE_MINUTES * 60 * 1000;
+
+  const byTask = new Map();
+  for (const e of events) {
+    if (!e.taskId) continue;
+    const arr = byTask.get(e.taskId) || [];
+    arr.push(e);
+    byTask.set(e.taskId, arr);
+  }
+
+  const outcome = { checked: 0, nudged: 0, recovered: 0, skipped: 0, items: [] };
+
+  for (const t of tasks) {
+    if (t.status !== 'in_progress') continue;
+    outcome.checked += 1;
+    const evidenceAt = Date.parse(t.lastExecutionEvidenceAt || t.updatedAt || t.createdAt || 0);
+    if (!Number.isFinite(evidenceAt)) { outcome.skipped += 1; continue; }
+    const ageMs = nowMs - evidenceAt;
+    if (ageMs < staleCutoffMs) continue;
+
+    const taskEvents = byTask.get(t.id) || [];
+    const nudges = taskEvents
+      .filter((e) => e.type === 'worker_nudge_sent' && (e.actor === 'watchdog' || e.actor === 'supervisor' || e.actor === actor))
+      .map((e) => Date.parse(e.at))
+      .filter(Number.isFinite)
+      .sort((a, b) => b - a);
+    const lastNudgeAt = nudges[0] || 0;
+
+    if (!lastNudgeAt || (lastNudgeAt < evidenceAt)) {
+      await addEvent({
+        type: 'worker_nudge_sent',
+        message: `${actor} nudge for stale in_progress ${t.id} (${t.owner}) age=${Math.round(ageMs / 60000)}m`,
+        taskId: t.id,
+        actor
+      });
+      await recordHeartbeat(t.owner, 'warn', `watchdog_nudge ${t.id}`);
+      outcome.nudged += 1;
+      outcome.items.push({ taskId: t.id, action: 'nudged', owner: t.owner, staleMinutes: Math.round(ageMs / 60000) });
+      continue;
+    }
+
+    if (nowMs - lastNudgeAt < graceMs) {
+      outcome.skipped += 1;
+      continue;
+    }
+
+    await updateTask({ id: t.id, status: 'assigned', owner: t.owner });
+    await resetAssignmentClaim(t.id, t.owner);
+    await addEvent({
+      type: 'worker_run_ended',
+      message: `${actor} recovered stale in_progress ${t.id} back to assigned`,
+      taskId: t.id,
+      actor
+    });
+    await addEvent({
+      type: 'watchdog_recovered',
+      message: `${t.id} recovered to assigned after stale in_progress timeout`,
+      taskId: t.id,
+      actor
+    });
+    outcome.recovered += 1;
+    outcome.items.push({ taskId: t.id, action: 'recovered', owner: t.owner, staleMinutes: Math.round(ageMs / 60000) });
+  }
+
+  return { ok: true, ...outcome, thresholds: { staleMinutes: WIP_STALE_MINUTES, graceMinutes: WIP_RECOVERY_GRACE_MINUTES } };
 }
 
 function getStandup(tasks) {
@@ -185,75 +258,8 @@ export const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/watchdog/run' && req.method === 'POST') {
       if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
-      const tasks = await listTasks();
-      const events = await listEvents(2000);
-      const nowMs = Date.now();
-      const staleCutoffMs = WIP_STALE_MINUTES * 60 * 1000;
-      const graceMs = WIP_RECOVERY_GRACE_MINUTES * 60 * 1000;
-
-      const byTask = new Map();
-      for (const e of events) {
-        if (!e.taskId) continue;
-        const arr = byTask.get(e.taskId) || [];
-        arr.push(e);
-        byTask.set(e.taskId, arr);
-      }
-
-      const outcome = { checked: 0, nudged: 0, recovered: 0, skipped: 0, items: [] };
-
-      for (const t of tasks) {
-        if (t.status !== 'in_progress') continue;
-        outcome.checked += 1;
-        const evidenceAt = Date.parse(t.lastExecutionEvidenceAt || t.updatedAt || t.createdAt || 0);
-        if (!Number.isFinite(evidenceAt)) { outcome.skipped += 1; continue; }
-        const ageMs = nowMs - evidenceAt;
-        if (ageMs < staleCutoffMs) continue;
-
-        const taskEvents = byTask.get(t.id) || [];
-        const nudges = taskEvents
-          .filter((e) => e.type === 'worker_nudge_sent' && (e.actor === 'watchdog' || e.actor === 'supervisor'))
-          .map((e) => Date.parse(e.at))
-          .filter(Number.isFinite)
-          .sort((a, b) => b - a);
-        const lastNudgeAt = nudges[0] || 0;
-
-        if (!lastNudgeAt || (lastNudgeAt < evidenceAt)) {
-          await addEvent({
-            type: 'worker_nudge_sent',
-            message: `watchdog nudge for stale in_progress ${t.id} (${t.owner}) age=${Math.round(ageMs / 60000)}m`,
-            taskId: t.id,
-            actor: 'watchdog'
-          });
-          await recordHeartbeat(t.owner, 'warn', `watchdog_nudge ${t.id}`);
-          outcome.nudged += 1;
-          outcome.items.push({ taskId: t.id, action: 'nudged', owner: t.owner, staleMinutes: Math.round(ageMs / 60000) });
-          continue;
-        }
-
-        if (nowMs - lastNudgeAt < graceMs) {
-          outcome.skipped += 1;
-          continue;
-        }
-
-        await updateTask({ id: t.id, status: 'assigned', owner: t.owner });
-        await resetAssignmentClaim(t.id, t.owner);
-        await addEvent({
-          type: 'worker_run_ended',
-          message: `watchdog recovered stale in_progress ${t.id} back to assigned`,
-          taskId: t.id,
-          actor: 'watchdog'
-        });
-        await addEvent({
-          type: 'watchdog_recovered',
-          message: `${t.id} recovered to assigned after stale in_progress timeout`,
-          taskId: t.id,
-          actor: 'watchdog'
-        });
-        outcome.recovered += 1;
-        outcome.items.push({ taskId: t.id, action: 'recovered', owner: t.owner, staleMinutes: Math.round(ageMs / 60000) });
-      }
-
-      return send(res, 200, { ok: true, ...outcome, thresholds: { staleMinutes: WIP_STALE_MINUTES, graceMinutes: WIP_RECOVERY_GRACE_MINUTES } });
+      const body = await parseBody(req);
+      return send(res, 200, await runWatchdogPass(body?.actor || 'watchdog'));
     }
 
     if (url.pathname === '/api/task/assign' && req.method === 'POST') {
@@ -420,5 +426,19 @@ export default server;
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   server.listen(PORT, HOST, () => {
     console.log(`Mission Control server running on http://${HOST}:${PORT}`);
+
+    if (!READ_ONLY && WATCHDOG_INTERVAL_MS > 0) {
+      console.log(`Watchdog scheduler enabled every ${WATCHDOG_INTERVAL_MS}ms`);
+      setInterval(async () => {
+        try {
+          const out = await runWatchdogPass('watchdog.scheduler');
+          if (out.nudged > 0 || out.recovered > 0) {
+            console.log(`watchdog.scheduler action: nudged=${out.nudged} recovered=${out.recovered}`);
+          }
+        } catch (err) {
+          console.error(`watchdog.scheduler error: ${String(err?.message || err)}`);
+        }
+      }, WATCHDOG_INTERVAL_MS).unref();
+    }
   });
 }
