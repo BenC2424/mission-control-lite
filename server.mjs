@@ -227,6 +227,14 @@ function ensureIntentTagPrefix(title = '', tag = null) {
   return `[${tag}] ${cur}`;
 }
 
+function isExecTask(task = {}, patch = {}) {
+  const taskTitleTag = parseIntentTag(task?.title || '');
+  const patchTitleTag = parseIntentTag(patch?.title || '');
+  const taskIntent = String(task?.intent || '').toUpperCase();
+  const patchIntent = String(patch?.intent || '').toUpperCase();
+  return taskIntent === 'EXEC' || taskTitleTag === 'EXEC' || patchIntent === 'EXEC' || patchTitleTag === 'EXEC';
+}
+
 const IN_PROGRESS_STALE_MINUTES = Math.max(1, Number(process.env.IN_PROGRESS_STALE_MINUTES || 60));
 const IN_PROGRESS_GRACE_CYCLES = Math.max(1, Number(process.env.IN_PROGRESS_GRACE_CYCLES || 1));
 const IN_PROGRESS_NOTE_GUARD_MINUTES = Math.max(1, Number(process.env.IN_PROGRESS_NOTE_GUARD_MINUTES || 5));
@@ -2214,8 +2222,8 @@ export const server = http.createServer(async (req, res) => {
       };
 
       let nextTask = { ...task };
-      const taskIntentTag = parseIntentTag(nextTask.title || '');
-      if (taskIntentTag === 'EXEC') {
+      const execOnCreate = isExecTask(nextTask, body || {});
+      if (execOnCreate) {
         const tenantAgents = await listTenantAgents();
         const workers = tenantAgents
           .map((a) => a.agentId)
@@ -2240,7 +2248,7 @@ export const server = http.createServer(async (req, res) => {
       }
 
       await createTask(nextTask);
-      if (taskIntentTag === 'EXEC' && nextTask.status === 'assigned' && nextTask.owner && nextTask.owner !== 'ops' && nextTask.owner !== 'ultron') {
+      if (execOnCreate && nextTask.status === 'assigned' && nextTask.owner && nextTask.owner !== 'ops' && nextTask.owner !== 'ultron') {
         await assignTask(nextTask.id, nextTask.owner);
         await addEvent({ type: 'exec_auto_assigned', message: `${nextTask.id} auto-assigned to ${nextTask.owner} on create`, taskId: nextTask.id, actor: body.actor || 'autopilot' });
       }
@@ -2357,12 +2365,9 @@ export const server = http.createServer(async (req, res) => {
         priority: patch.priority && VALID_PRIORITY.includes(patch.priority) ? patch.priority : undefined
       });
 
-      const existingIntentTag = parseIntentTag(existing.title || '');
-      const updatedIntentTag = parseIntentTag(t.title || '');
-      const patchIntent = String(patch.intent || '').trim().toUpperCase();
-      const isExecTask = (existingIntentTag === 'EXEC' || updatedIntentTag === 'EXEC' || patchIntent === 'EXEC');
+      const execOnUpdate = isExecTask(existing, patch) || isExecTask(t, patch);
 
-      const reassignmentBranch = (isExecTask && t.status === 'assigned' && t.owner && t.owner !== 'ops' && t.owner !== 'ultron');
+      const reassignmentBranch = (execOnUpdate && t.status === 'assigned' && t.owner && t.owner !== 'ops' && t.owner !== 'ultron');
       if (reassignmentBranch) {
         await reassignTask(t.id, t.owner);
         await addEvent({ type: 'exec_auto_assigned', message: `${t.id} auto-assigned to ${t.owner} on update`, taskId: t.id, actor: patch.actor || 'autopilot' });
