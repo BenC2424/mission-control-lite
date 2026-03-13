@@ -19,17 +19,32 @@
         <div class="metric"><span id="metric-done">0</span><label>Done</label></div>
         <div class="metric"><span id="metric-stale">0</span><label>Stale >24h</label></div>
         <div class="metric"><span id="metric-escalations">0</span><label>Escalations</label></div>
+        <div class="metric hidden" id="metric-flowratio-tile"><span id="metric-flowratio">n/a</span><label>Flow Ratio</label></div>
       </div>
       <div class="actions">
         <span id="readonlyBadge" class="badge hidden">READ-ONLY</span>
+        <label class="muted hidden">Role
+          <select id="roleMode">
+            <option value="ops">ops</option>
+            <option value="worker">worker</option>
+            <option value="ultron">ultron</option>
+          </select>
+        </label>
+        <label id="workerAgentWrap" class="muted">Worker
+          <select id="workerAgentMode">
+            <option value="codi">codi</option>
+            <option value="scout">scout</option>
+          </select>
+        </label>
+        <button id="claimNextBtn">Claim Next</button>
         <button id="newTaskBtn">+ New Task</button>
-        <button id="refreshBtn">Refresh</button>
+        <button id="refreshBtn" class="hidden">Refresh</button>
         <button id="standupBtn">Generate Standup</button>
-        <button id="archiveDoneBtn">Archive Done</button>
-        <button id="wakeCodiBtn">Wake Codi</button>
-        <button id="wakeScoutBtn">Wake Scout</button>
-        <button id="exportBtn">Export</button>
-        <button id="importBtn">Import</button>
+        <button id="archiveDoneBtn" class="hidden">Archive Done</button>
+        <button id="wakeCodiBtn" class="hidden">Wake Codi</button>
+        <button id="wakeScoutBtn" class="hidden">Wake Scout</button>
+        <button id="exportBtn" class="hidden">Export</button>
+        <button id="importBtn" class="hidden">Import</button>
         <input id="importFile" type="file" accept="application/json" hidden />
       </div>
     </header>
