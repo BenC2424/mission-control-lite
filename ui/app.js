@@ -413,16 +413,8 @@ function renderMetrics() {
   const openTasks = Number(metrics?.tasks?.open || 0);
   const staleOpen = Number(metrics?.staleOpen || 0);
   const staleRatio = openTasks > 0 ? (staleOpen / openTasks) : 0;
-  const staleWarnEl = $('staleBacklogWarning');
-  if (staleWarnEl) {
-    if (staleRatio > 0.5) {
-      staleWarnEl.textContent = '⚠ STALE TASK BACKLOG';
-      staleWarnEl.title = `${staleOpen} of ${openTasks} open tasks are stale`;
-    } else {
-      staleWarnEl.textContent = '';
-      staleWarnEl.title = '';
-    }
-  }
+  const staleMsg = staleRatio > 0.5 ? ` ⚠ STALE TASK BACKLOG (${staleOpen} of ${openTasks} open tasks are stale)` : '';
+  $('assignmentHealth').textContent = `assignment health: ${completed}/${total} completed (${pct}%) • in-flight ${a.inFlightAssignments || 0}${staleMsg}`;
 
   // Tower health bar + diagnostics
   const ch = boardHealth?.contract_health || {};
