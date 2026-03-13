@@ -105,14 +105,17 @@ async function runWatchdogPass(actor = 'watchdog') {
     if (ageMs < staleCutoffMs) continue;
 
     const taskEvents = byTask.get(t.id) || [];
-    const nudges = taskEvents
-      .filter((e) => e.type === 'worker_nudge_sent' && (e.actor === 'watchdog' || e.actor === 'supervisor' || e.actor === actor))
+    const nudgeTimes = taskEvents
+      .filter((e) => e.type === 'worker_nudge_sent')
       .map((e) => Date.parse(e.at))
       .filter(Number.isFinite)
       .sort((a, b) => b - a);
-    const lastNudgeAt = nudges[0] || 0;
+    const lastNudgeAt = nudgeTimes[0] || 0;
 
-    if (!lastNudgeAt || (lastNudgeAt < evidenceAt)) {
+    // Start a stale episode with a single nudge.
+    // Any new execution evidence starts a fresh episode and allows another nudge.
+    const needsInitialNudge = !lastNudgeAt || (lastNudgeAt < evidenceAt);
+    if (needsInitialNudge) {
       await addEvent({
         type: 'worker_nudge_sent',
         message: `${actor} nudge for stale in_progress ${t.id} (${t.owner}) age=${Math.round(ageMs / 60000)}m`,
@@ -125,6 +128,7 @@ async function runWatchdogPass(actor = 'watchdog') {
       continue;
     }
 
+    // Grace countdown anchors to last nudge for this stale episode.
     if (nowMs - lastNudgeAt < graceMs) {
       outcome.skipped += 1;
       continue;
