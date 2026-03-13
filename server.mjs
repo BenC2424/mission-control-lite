@@ -38,7 +38,8 @@ const paths = {
   tasks: join(__dirname, 'runtime', 'tasks.json'),
   agents: join(__dirname, 'config', 'agents.json'),
   standup: join(__dirname, 'runtime', 'standup-latest.md'),
-  activity: join(__dirname, 'runtime', 'activity.json')
+  activity: join(__dirname, 'runtime', 'activity.json'),
+  leases: join(__dirname, 'runtime', 'execution-leases.json')
 };
 
 const mime = {
@@ -53,6 +54,30 @@ const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
 const writeJson = (p, v) => writeFileSync(p, JSON.stringify(v, null, 2) + '\n');
 const now = () => new Date().toISOString();
 await seedFromJsonIfEmpty();
+
+if (!existsSync(paths.leases)) writeJson(paths.leases, { version: 1, leases: {} });
+const getLeases = () => readJson(paths.leases);
+function openLease(taskId, agentId) {
+  const db = getLeases();
+  const runId = `run-${randomUUID().slice(0, 12)}`;
+  db.leases[taskId] = { runId, agentId, status: 'active', openedAt: now(), closedAt: null };
+  writeJson(paths.leases, db);
+  return db.leases[taskId];
+}
+function closeLease(taskId, reason = 'closed') {
+  const db = getLeases();
+  const lease = db.leases[taskId];
+  if (!lease || lease.status !== 'active') return null;
+  lease.status = reason;
+  lease.closedAt = now();
+  writeJson(paths.leases, db);
+  return lease;
+}
+function activeLease(taskId) {
+  const db = getLeases();
+  const lease = db.leases[taskId];
+  return lease && lease.status === 'active' ? lease : null;
+}
 
 function send(res, status, body, type = 'application/json; charset=utf-8') {
   res.writeHead(status, { 'Content-Type': type, 'Access-Control-Allow-Origin': '*' });
@@ -136,6 +161,7 @@ async function runWatchdogPass(actor = 'watchdog') {
 
     await updateTask({ id: t.id, status: 'assigned', owner: t.owner });
     await resetAssignmentClaim(t.id, t.owner);
+    closeLease(t.id, 'recovered');
     await addEvent({
       type: 'worker_run_ended',
       message: `${actor} recovered stale in_progress ${t.id} back to assigned`,
@@ -221,8 +247,10 @@ export const server = http.createServer(async (req, res) => {
       const summary = task ? `claimed ${task.id}` : 'no_actionable_tasks';
       await recordHeartbeat(agentId, 'ok', summary);
       if (task) {
-        await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
-        await addEvent({ type: 'worker_claimed_task', message: `${agentId} accepted task payload for ${task.id}`, taskId: task.id, actor: agentId });
+        const lease = openLease(task.id, agentId);
+        await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id} run_id=${lease.runId}`, taskId: task.id, actor: agentId });
+        await addEvent({ type: 'worker_claimed_task', message: `${agentId} accepted task payload for ${task.id} run_id=${lease.runId}`, taskId: task.id, actor: agentId });
+        task.runId = lease.runId;
       }
       return send(res, 200, { ok: true, agentId, task, inboxCount: (await agentInbox(agentId)).length });
     }
@@ -232,9 +260,10 @@ export const server = http.createServer(async (req, res) => {
       const agentId = url.pathname.split('/')[3];
       const task = await claimNext(agentId);
       if (!task) return send(res, 200, { ok: true, task: null });
-      await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id}`, taskId: task.id, actor: agentId });
-      await addEvent({ type: 'worker_claimed_task', message: `${agentId} accepted task payload for ${task.id}`, taskId: task.id, actor: agentId });
-      return send(res, 200, { ok: true, task });
+      const lease = openLease(task.id, agentId);
+      await addEvent({ type: 'task_claimed', message: `${agentId} claimed ${task.id} run_id=${lease.runId}`, taskId: task.id, actor: agentId });
+      await addEvent({ type: 'worker_claimed_task', message: `${agentId} accepted task payload for ${task.id} run_id=${lease.runId}`, taskId: task.id, actor: agentId });
+      return send(res, 200, { ok: true, task: { ...task, runId: lease.runId } });
     }
 
     if (url.pathname === '/api/heartbeat/run' && req.method === 'POST') {
@@ -255,7 +284,22 @@ export const server = http.createServer(async (req, res) => {
       if (!allowed.has(type)) {
         return send(res, 400, { error: 'validation_failed', details: ['unsupported worker event type'] });
       }
-      await addEvent({ type, taskId: body.taskId, actor: body.agentId, message: body.message || `${body.agentId} ${type} ${body.taskId}` });
+
+      const lease = activeLease(body.taskId);
+      if (!body.runId) {
+        return send(res, 409, { error: 'run_id_required', details: ['runId is required for worker events'] });
+      }
+      if (!lease || lease.runId !== body.runId || lease.agentId !== body.agentId) {
+        await addEvent({
+          type: 'worker_event_rejected_old_run',
+          taskId: body.taskId,
+          actor: body.agentId,
+          message: `ignored ${type} for stale/non-active run_id=${body.runId}`
+        });
+        return send(res, 202, { ok: true, ignored: true, reason: 'stale_or_non_active_run' });
+      }
+
+      await addEvent({ type, taskId: body.taskId, actor: body.agentId, message: body.message || `${body.agentId} ${type} ${body.taskId} run_id=${body.runId}` });
       if (body.note) await addNote(body.taskId, String(body.note), body.agentId);
       return send(res, 200, { ok: true });
     }
@@ -365,6 +409,7 @@ export const server = http.createServer(async (req, res) => {
       });
       if (!t) return send(res, 404, { error: 'task not found' });
 
+      if (['done','archived'].includes(String(t.status))) closeLease(t.id, 'completed');
       await logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`, t.id, patch.actor || 'ui');
       return send(res, 200, { ok: true, task: {
         id: t.id, title: t.title, status: t.status, priority: t.priority, owner: t.owner, updatedAt: t.updated_at
@@ -380,12 +425,15 @@ export const server = http.createServer(async (req, res) => {
       await addNote(body.id, body.note || '', actor);
       await logEvent('task_note', `${body.id}: ${body.note || ''}`, body.id, actor);
       if (['codi', 'scout'].includes(String(actor)) && String(body.note || '').trim()) {
-        await addEvent({
-          type: 'worker_first_progress',
-          message: `${actor} posted first progress evidence for ${body.id}`,
-          taskId: body.id,
-          actor
-        });
+        const lease = activeLease(body.id);
+        if (lease && lease.agentId === actor) {
+          await addEvent({
+            type: 'worker_first_progress',
+            message: `${actor} posted first progress evidence for ${body.id} run_id=${lease.runId}`,
+            taskId: body.id,
+            actor
+          });
+        }
       }
       return send(res, 200, { ok: true });
     }
