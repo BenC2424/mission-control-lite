@@ -395,9 +395,14 @@ function renderMetrics() {
   }
 
   const hb = metrics?.latestHeartbeats?.[0];
+  const newestHb = (metrics?.latestHeartbeats || [])
+    .map((h) => new Date(h.at).getTime())
+    .filter((ts) => Number.isFinite(ts))
+    .sort((a, b) => b - a)[0];
+  const hbStale = !newestHb || (Date.now() - newestHb) > (10 * 60 * 1000);
   $('heartbeatStatus').textContent = hb
-    ? `heartbeat: ${hb.agentId} ${hb.status} @ ${hb.at}`
-    : 'heartbeat: no runs yet';
+    ? `heartbeat: ${hb.agentId} ${hb.status} @ ${hb.at} • agent_health ${hbStale ? 'STALE' : 'LIVE'}`
+    : 'heartbeat: no runs yet • agent_health STALE';
 
   const a = metrics?.assignments || {};
   const total = Number(a.totalAssignments || 0);
