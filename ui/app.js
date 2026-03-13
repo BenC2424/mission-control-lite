@@ -378,7 +378,7 @@ function renderMetrics() {
   const byStatus = boardHealth?.by_status || {};
   const flow = boardHealth?.flow_ratio || null;
 
-  $('metric-agents').textContent = String(metrics?.agentsHealthy ?? cachedAgents.length);
+  $('metric-agents').textContent = String(metrics?.agentsHealthy ?? 0);
   $('metric-tasks').textContent = String(metrics?.tasks?.total ?? cachedTasks.length);
   $('metric-inprogress').textContent = String(metrics?.assignments?.inFlightAssignments ?? byStatus.in_progress ?? 0);
   $('metric-done').textContent = String(metrics?.tasks?.done ?? byStatus.done ?? 0);
