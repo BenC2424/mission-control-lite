@@ -472,9 +472,9 @@ function renderMetrics() {
   }
 
   const ageBins = { '0-2h': 0, '2-8h': 0, '8-24h': 0, '24h+': 0 };
-  const openTasks = cachedTasks.filter((t) => !['done','archived'].includes(t.status));
+  const openTaskList = cachedTasks.filter((t) => !['done','archived'].includes(t.status));
   const nowMs = Date.now();
-  for (const t of openTasks) {
+  for (const t of openTaskList) {
     const at = new Date(t.updatedAt || t.createdAt || 0).getTime();
     const ageH = Math.max(0, (nowMs - at) / 3600000);
     if (ageH < 2) ageBins['0-2h'] += 1;
