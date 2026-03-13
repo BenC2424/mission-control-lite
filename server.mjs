@@ -55,27 +55,45 @@ const writeJson = (p, v) => writeFileSync(p, JSON.stringify(v, null, 2) + '\n');
 const now = () => new Date().toISOString();
 await seedFromJsonIfEmpty();
 
-if (!existsSync(paths.leases)) writeJson(paths.leases, { version: 1, leases: {} });
-const getLeases = () => readJson(paths.leases);
+let leaseState = { version: 1, leases: {} };
+let leasePersistenceEnabled = true;
+try {
+  if (existsSync(paths.leases)) {
+    leaseState = readJson(paths.leases);
+  } else {
+    writeJson(paths.leases, leaseState);
+  }
+} catch {
+  // Serverless/read-only filesystems cannot persist runtime state.
+  // Fallback to in-memory lease store for process lifetime.
+  leasePersistenceEnabled = false;
+}
+
+function persistLeases() {
+  if (!leasePersistenceEnabled) return;
+  try {
+    writeJson(paths.leases, leaseState);
+  } catch {
+    leasePersistenceEnabled = false;
+  }
+}
+
 function openLease(taskId, agentId) {
-  const db = getLeases();
   const runId = `run-${randomUUID().slice(0, 12)}`;
-  db.leases[taskId] = { runId, agentId, status: 'active', openedAt: now(), closedAt: null };
-  writeJson(paths.leases, db);
-  return db.leases[taskId];
+  leaseState.leases[taskId] = { runId, agentId, status: 'active', openedAt: now(), closedAt: null };
+  persistLeases();
+  return leaseState.leases[taskId];
 }
 function closeLease(taskId, reason = 'closed') {
-  const db = getLeases();
-  const lease = db.leases[taskId];
+  const lease = leaseState.leases[taskId];
   if (!lease || lease.status !== 'active') return null;
   lease.status = reason;
   lease.closedAt = now();
-  writeJson(paths.leases, db);
+  persistLeases();
   return lease;
 }
 function activeLease(taskId) {
-  const db = getLeases();
-  const lease = db.leases[taskId];
+  const lease = leaseState.leases[taskId];
   return lease && lease.status === 'active' ? lease : null;
 }
 
