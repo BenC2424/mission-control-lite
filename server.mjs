@@ -39,8 +39,6 @@ import {
   createWeeklyReportRecord,
   listTenantAgents,
   addTenantAgent,
-  getTaskAssignmentsDebug,
-  getTaskCoreDebug,
   getTeamTemplate,
   listTeamTemplates,
   upsertTenantTeam,
@@ -449,24 +447,6 @@ export const server = http.createServer(async (req, res) => {
       return send(res, 200, { ...payload, agents });
     }
     if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, { version: 1, events: await listEvents(300) });
-
-    if (url.pathname === '/api/debug/task-assignments' && req.method === 'GET') {
-      const ids = String(url.searchParams.get('taskIds') || '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const rows = await getTaskAssignmentsDebug(ids);
-      return send(res, 200, { rows });
-    }
-
-    if (url.pathname === '/api/debug/task-core' && req.method === 'GET') {
-      const ids = String(url.searchParams.get('taskIds') || '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const rows = await getTaskCoreDebug(ids);
-      return send(res, 200, { rows });
-    }
 
     if (url.pathname.startsWith('/api/agent/') && url.pathname.endsWith('/inbox') && req.method === 'GET') {
       const agentId = url.pathname.split('/')[3];
@@ -2384,12 +2364,8 @@ export const server = http.createServer(async (req, res) => {
 
       const reassignmentBranch = (isExecTask && t.status === 'assigned' && t.owner && t.owner !== 'ops' && t.owner !== 'ultron');
       if (reassignmentBranch) {
-        await addEvent({ type: 'exec_reassign_trace', message: `${t.id} branch_entered=yes target_owner=${t.owner} isExec=${isExecTask}`, taskId: t.id, actor: patch.actor || 'autopilot' });
-        const trace = await reassignTask(t.id, t.owner);
-        await addEvent({ type: 'exec_reassign_trace', message: `${t.id} reassign_called=yes commit_success=${trace?.commit_success === true ? 'yes' : 'no'} open_before=${trace?.open_before ?? 'na'} target_before=${trace?.target_before ?? 'na'} open_after=${trace?.open_after ?? 'na'} target_after=${trace?.target_after ?? 'na'} error=${trace?.error || 'none'}`, taskId: t.id, actor: patch.actor || 'autopilot' });
+        await reassignTask(t.id, t.owner);
         await addEvent({ type: 'exec_auto_assigned', message: `${t.id} auto-assigned to ${t.owner} on update`, taskId: t.id, actor: patch.actor || 'autopilot' });
-      } else {
-        await addEvent({ type: 'exec_reassign_trace', message: `${t.id} branch_entered=no isExec=${isExecTask} existingIntent=${existingIntentTag || 'none'} updatedIntent=${updatedIntentTag || 'none'} patchIntent=${patchIntent || 'none'} status=${t.status} owner=${t.owner}`, taskId: t.id, actor: patch.actor || 'autopilot' });
       }
 
       await logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`, t.id, patch.actor || 'ui');
