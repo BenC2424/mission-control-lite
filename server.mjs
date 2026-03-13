@@ -2377,15 +2377,19 @@ export const server = http.createServer(async (req, res) => {
         priority: patch.priority && VALID_PRIORITY.includes(patch.priority) ? patch.priority : undefined
       });
 
-      const updatedIntentTag = parseIntentTag(existing.title || '');
-      const reassignmentBranch = (updatedIntentTag === 'EXEC' && t.status === 'assigned' && t.owner && t.owner !== 'ops' && t.owner !== 'ultron');
+      const existingIntentTag = parseIntentTag(existing.title || '');
+      const updatedIntentTag = parseIntentTag(t.title || '');
+      const patchIntent = String(patch.intent || '').trim().toUpperCase();
+      const isExecTask = (existingIntentTag === 'EXEC' || updatedIntentTag === 'EXEC' || patchIntent === 'EXEC');
+
+      const reassignmentBranch = (isExecTask && t.status === 'assigned' && t.owner && t.owner !== 'ops' && t.owner !== 'ultron');
       if (reassignmentBranch) {
-        await addEvent({ type: 'exec_reassign_trace', message: `${t.id} branch_entered=yes target_owner=${t.owner}`, taskId: t.id, actor: patch.actor || 'autopilot' });
+        await addEvent({ type: 'exec_reassign_trace', message: `${t.id} branch_entered=yes target_owner=${t.owner} isExec=${isExecTask}`, taskId: t.id, actor: patch.actor || 'autopilot' });
         const trace = await reassignTask(t.id, t.owner);
         await addEvent({ type: 'exec_reassign_trace', message: `${t.id} reassign_called=yes commit_success=${trace?.commit_success === true ? 'yes' : 'no'} open_before=${trace?.open_before ?? 'na'} target_before=${trace?.target_before ?? 'na'} open_after=${trace?.open_after ?? 'na'} target_after=${trace?.target_after ?? 'na'} error=${trace?.error || 'none'}`, taskId: t.id, actor: patch.actor || 'autopilot' });
         await addEvent({ type: 'exec_auto_assigned', message: `${t.id} auto-assigned to ${t.owner} on update`, taskId: t.id, actor: patch.actor || 'autopilot' });
       } else {
-        await addEvent({ type: 'exec_reassign_trace', message: `${t.id} branch_entered=no intent=${updatedIntentTag || 'none'} status=${t.status} owner=${t.owner}`, taskId: t.id, actor: patch.actor || 'autopilot' });
+        await addEvent({ type: 'exec_reassign_trace', message: `${t.id} branch_entered=no isExec=${isExecTask} existingIntent=${existingIntentTag || 'none'} updatedIntent=${updatedIntentTag || 'none'} patchIntent=${patchIntent || 'none'} status=${t.status} owner=${t.owner}`, taskId: t.id, actor: patch.actor || 'autopilot' });
       }
 
       await logEvent('task_updated', `${t.id} -> ${t.status} (${t.owner})`, t.id, patch.actor || 'ui');
