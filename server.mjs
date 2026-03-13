@@ -19,6 +19,7 @@ import {
   markInboxSeen,
   claimNext,
   recordHeartbeat,
+  resetAssignmentClaim,
   getMetrics,
   getEscalations,
   clearAllData
@@ -29,6 +30,8 @@ const __dirname = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const HOST = '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
 const READ_ONLY = process.env.READ_ONLY === '1';
+const WIP_STALE_MINUTES = Number(process.env.MCL_WIP_STALE_MINUTES || 15);
+const WIP_RECOVERY_GRACE_MINUTES = Number(process.env.MCL_WIP_RECOVERY_GRACE_MINUTES || 5);
 
 const paths = {
   tasks: join(__dirname, 'runtime', 'tasks.json'),
@@ -178,6 +181,79 @@ export const server = http.createServer(async (req, res) => {
       await addEvent({ type, taskId: body.taskId, actor: body.agentId, message: body.message || `${body.agentId} ${type} ${body.taskId}` });
       if (body.note) await addNote(body.taskId, String(body.note), body.agentId);
       return send(res, 200, { ok: true });
+    }
+
+    if (url.pathname === '/api/watchdog/run' && req.method === 'POST') {
+      if (READ_ONLY) return send(res, 403, { error: 'read_only_mode' });
+      const tasks = await listTasks();
+      const events = await listEvents(2000);
+      const nowMs = Date.now();
+      const staleCutoffMs = WIP_STALE_MINUTES * 60 * 1000;
+      const graceMs = WIP_RECOVERY_GRACE_MINUTES * 60 * 1000;
+
+      const byTask = new Map();
+      for (const e of events) {
+        if (!e.taskId) continue;
+        const arr = byTask.get(e.taskId) || [];
+        arr.push(e);
+        byTask.set(e.taskId, arr);
+      }
+
+      const outcome = { checked: 0, nudged: 0, recovered: 0, skipped: 0, items: [] };
+
+      for (const t of tasks) {
+        if (t.status !== 'in_progress') continue;
+        outcome.checked += 1;
+        const evidenceAt = Date.parse(t.lastExecutionEvidenceAt || t.updatedAt || t.createdAt || 0);
+        if (!Number.isFinite(evidenceAt)) { outcome.skipped += 1; continue; }
+        const ageMs = nowMs - evidenceAt;
+        if (ageMs < staleCutoffMs) continue;
+
+        const taskEvents = byTask.get(t.id) || [];
+        const nudges = taskEvents
+          .filter((e) => e.type === 'worker_nudge_sent' && (e.actor === 'watchdog' || e.actor === 'supervisor'))
+          .map((e) => Date.parse(e.at))
+          .filter(Number.isFinite)
+          .sort((a, b) => b - a);
+        const lastNudgeAt = nudges[0] || 0;
+
+        if (!lastNudgeAt || (lastNudgeAt < evidenceAt)) {
+          await addEvent({
+            type: 'worker_nudge_sent',
+            message: `watchdog nudge for stale in_progress ${t.id} (${t.owner}) age=${Math.round(ageMs / 60000)}m`,
+            taskId: t.id,
+            actor: 'watchdog'
+          });
+          await recordHeartbeat(t.owner, 'warn', `watchdog_nudge ${t.id}`);
+          outcome.nudged += 1;
+          outcome.items.push({ taskId: t.id, action: 'nudged', owner: t.owner, staleMinutes: Math.round(ageMs / 60000) });
+          continue;
+        }
+
+        if (nowMs - lastNudgeAt < graceMs) {
+          outcome.skipped += 1;
+          continue;
+        }
+
+        await updateTask({ id: t.id, status: 'assigned', owner: t.owner });
+        await resetAssignmentClaim(t.id, t.owner);
+        await addEvent({
+          type: 'worker_run_ended',
+          message: `watchdog recovered stale in_progress ${t.id} back to assigned`,
+          taskId: t.id,
+          actor: 'watchdog'
+        });
+        await addEvent({
+          type: 'watchdog_recovered',
+          message: `${t.id} recovered to assigned after stale in_progress timeout`,
+          taskId: t.id,
+          actor: 'watchdog'
+        });
+        outcome.recovered += 1;
+        outcome.items.push({ taskId: t.id, action: 'recovered', owner: t.owner, staleMinutes: Math.round(ageMs / 60000) });
+      }
+
+      return send(res, 200, { ok: true, ...outcome, thresholds: { staleMinutes: WIP_STALE_MINUTES, graceMinutes: WIP_RECOVERY_GRACE_MINUTES } });
     }
 
     if (url.pathname === '/api/task/assign' && req.method === 'POST') {
