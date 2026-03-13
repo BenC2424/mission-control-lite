@@ -224,12 +224,26 @@ function renderKpiDashboard() {
 
 function renderMetrics() {
   const tasks = filteredTasks();
+  const inProgress = tasks.filter((t) => t.status === 'in_progress').length;
+  const review = tasks.filter((t) => t.status === 'review').length;
+  const stale = Number(metrics?.staleOpen ?? 0);
+  const escalations = Number(metrics?.escalationCount ?? 0);
+
   $('metric-agents').textContent = String(cachedAgents.length);
   $('metric-tasks').textContent = String(tasks.length);
-  $('metric-inprogress').textContent = String(tasks.filter((t) => t.status === 'in_progress').length);
+  $('metric-inprogress').textContent = String(inProgress);
   $('metric-done').textContent = String(metrics?.tasks?.done ?? 0);
-  $('metric-stale').textContent = String(metrics?.staleOpen ?? 0);
-  $('metric-escalations').textContent = String(metrics?.escalationCount ?? 0);
+  $('metric-stale').textContent = String(stale);
+  $('metric-escalations').textContent = String(escalations);
+
+  const flow = inProgress > 0 ? ((Number(metrics?.tasks?.done ?? 0) / Math.max(1, inProgress)).toFixed(1)) : 'n/a';
+  const healthyAgents = cachedAgents.filter((a) => tasks.filter((t) => t.owner === a.id && t.status === 'in_progress').length <= 1).length;
+  if ($('health-flow-value')) $('health-flow-value').textContent = String(flow);
+  if ($('health-wip')) $('health-wip').textContent = String(inProgress);
+  if ($('health-review')) $('health-review').textContent = String(review);
+  if ($('health-stale')) $('health-stale').textContent = String(stale);
+  if ($('health-escalations')) $('health-escalations').textContent = String(escalations);
+  if ($('health-agents')) $('health-agents').textContent = `${healthyAgents}/${cachedAgents.length}`;
 
   const hb = metrics?.latestHeartbeats?.[0];
   $('heartbeatStatus').textContent = hb
