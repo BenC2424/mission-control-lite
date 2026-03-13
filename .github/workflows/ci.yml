@@ -17,4 +17,5 @@ jobs:
           node-version: 22
       - run: npm install
       - run: npm test
+      - run: node --test test/exec-pipeline.test.mjs
       - run: npm run check
